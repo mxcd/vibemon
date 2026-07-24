@@ -387,7 +387,11 @@ func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
 	} else if a.OAuth.expiresSoon() {
 		refreshed, err := refreshToken(a.OAuth.RefreshToken)
 		if err != nil {
-			a.NeedsReauth = errors.Is(err, errNeedsReauth)
+			// Only a rejected grant flips this on. A throttle or a network blip says nothing about
+			// whether the account is still good, and must not clear a flag already raised.
+			if errors.Is(err, errNeedsReauth) {
+				a.NeedsReauth = true
+			}
 			return Usage{}, err
 		}
 		refreshed.Scopes = a.OAuth.Scopes
@@ -402,7 +406,9 @@ func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
 	}
 	u, err := fetchUsage(token)
 	if err != nil {
-		a.NeedsReauth = errors.Is(err, errNeedsReauth)
+		if errors.Is(err, errNeedsReauth) {
+			a.NeedsReauth = true
+		}
 		return Usage{}, err
 	}
 	a.NeedsReauth = false

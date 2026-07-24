@@ -93,7 +93,7 @@ Accounts live in your login keychain under `vibemon-accounts`. Switching rewrite
 key inside Claude Code's own keychain item (`Claude Code-credentials`) and patches `oauthAccount` and
 `userID` in `~/.claude.json`.
 
-Three properties this is careful about, because getting them wrong is silent and expensive:
+Properties this is careful about, because getting them wrong is silent and expensive:
 
 - **MCP tokens are preserved.** That keychain item also holds every MCP server token you have
   authorised. Only the `claudeAiOauth` key is ever replaced; everything else passes through
@@ -102,6 +102,11 @@ Three properties this is careful about, because getting them wrong is silent and
   useful, so each write is read back and compared before it counts.
 - **The active account's token is never refreshed by vibemon.** Claude Code owns it; refreshing it
   from outside risks invalidating the session you are sitting in. Only parked accounts get refreshed.
+
+The usage endpoint rate limits per account, so the active account is polled every 3 minutes and
+parked ones every 20 — the countdowns tick locally in between. A failed fetch benches that account
+with exponential backoff (2 minutes doubling to 30, or whatever `Retry-After` asks for) and the last
+known numbers stay on screen. A 429 is never mistaken for a dead account.
 
 Nothing leaves your machine except the two Anthropic API calls above. Preferences live in
 `~/Library/Application Support/vibemon/prefs.json` and contain no secrets.

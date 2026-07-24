@@ -5,7 +5,7 @@ Go + Wails v3, single binary, plain HTML/CSS panel — no npm, no frontend build
 
 ## Read this before touching credentials
 
-Three rules, each learned the hard way. Breaking any of them silently damages the user's setup.
+Four rules, each learned the hard way. Breaking any of them silently damages the user's setup.
 
 **1. Never overwrite the Claude Code keychain blob wholesale.**
 `service="Claude Code-credentials"` holds `claudeAiOauth` *and* `mcpOAuth` — every MCP server token
@@ -22,6 +22,12 @@ at 128 bytes without complaint — it once stored a 1562-byte vault as 128 bytes
 Claude Code owns those tokens and keeps them fresh. If Anthropic rotates refresh tokens, refreshing
 from here invalidates the running session's token and logs the user out. `usageFor` reads the active
 account's token straight from the keychain and only ever refreshes *parked* accounts.
+
+**4. Classify HTTP failures before acting on them.**
+`/api/oauth/usage` rate limits per account. A 429 means "ask later"; only 400/401/403 mean the grant
+is dead. Treating every 4xx as re-auth once told the user to log in again on a healthy account. Every
+failed fetch benches that account (`monitor.penalise`) instead of retrying on the next tick, and a
+transient error never clears an existing `NeedsReauth` flag.
 
 Related: shell out to `/usr/bin/security` rather than calling `SecItem*` via cgo. Claude Code
 created the keychain item through that same binary, so its ACL already trusts it and reads/writes

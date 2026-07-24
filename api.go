@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -15,8 +16,10 @@ const (
 	oauthBeta     = "oauth-2025-04-20"
 	usageURL      = "https://api.anthropic.com/api/oauth/usage"
 	profileURL    = "https://api.anthropic.com/api/oauth/profile"
-	tokenURL      = "https://platform.claude.com/v1/oauth/token"
 )
+
+// A var so tests can point the refresh flow at a local server.
+var tokenURL = "https://platform.claude.com/v1/oauth/token"
 
 // errNeedsReauth means the refresh token is dead — only a fresh `claude /login` fixes it.
 var errNeedsReauth = errors.New("account needs re-authentication")
@@ -138,10 +141,40 @@ func authGet(url, token string, into any) error {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("%s: %w (HTTP %d)", url, errNeedsReauth, resp.StatusCode)
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &rateLimitError{RetryAfter: retryAfter(resp)}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(string(body), 200))
 	}
 	return json.Unmarshal(body, into)
+}
+
+// rateLimitError means "ask again later", never "something is wrong with this account". Keeping it
+// distinct from errNeedsReauth matters: a 429 must not tell the user to log in again.
+type rateLimitError struct{ RetryAfter time.Duration }
+
+func (e *rateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("rate limited, retry in %s", e.RetryAfter.Round(time.Second))
+	}
+	return "rate limited"
+}
+
+func retryAfter(resp *http.Response) time.Duration {
+	h := resp.Header.Get("Retry-After")
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(h); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(h); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func fetchUsage(token string) (Usage, error) {
@@ -209,10 +242,17 @@ func refreshToken(refresh string) (OAuth, error) {
 	if err != nil {
 		return OAuth{}, err
 	}
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+	// Only a rejected grant means the account really needs a new login. Throttling and server-side
+	// faults are temporary, and mislabelling them would send the user off to re-authenticate an
+	// account that is perfectly fine.
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return OAuth{}, &rateLimitError{RetryAfter: retryAfter(resp)}
+	case resp.StatusCode == http.StatusBadRequest,
+		resp.StatusCode == http.StatusUnauthorized,
+		resp.StatusCode == http.StatusForbidden:
 		return OAuth{}, fmt.Errorf("refresh: %w (HTTP %d: %s)", errNeedsReauth, resp.StatusCode, truncate(string(body), 200))
-	}
-	if resp.StatusCode != http.StatusOK {
+	case resp.StatusCode != http.StatusOK:
 		return OAuth{}, fmt.Errorf("refresh: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	var tr tokenResponse

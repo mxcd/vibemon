@@ -157,8 +157,10 @@ function render() {
   const accounts = state.accounts || [];
   const active = accounts.find(a => a.active);
 
-  el('notice').hidden = !state.notice;
-  el('notice').textContent = state.notice || '';
+  // A stale-data warning belongs on screen even when the gauges still have old numbers to show.
+  const problem = state.notice || (active && active.error) || '';
+  el('notice').hidden = !problem;
+  el('notice').textContent = problem;
   el('stamp').textContent = state.updatedAt
     ? new Date(state.updatedAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     : '';

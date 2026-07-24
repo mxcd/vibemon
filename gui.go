@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -20,8 +21,14 @@ import (
 var assets embed.FS
 
 const (
-	activePollInterval = time.Minute
-	parkedPollInterval = 10 * time.Minute
+	// A 5-hour and a 7-day window do not move fast enough to justify polling hard, and the usage
+	// endpoint rate limits. The countdowns tick locally in the panel between fetches anyway.
+	activePollInterval = 3 * time.Minute
+	parkedPollInterval = 20 * time.Minute
+
+	// Per-account backoff after a failed fetch, doubling up to the cap.
+	backoffBase = 2 * time.Minute
+	backoffCap  = 30 * time.Minute
 
 	// Auto-rotation thresholds. 95 rather than 99 on purpose: at 99% the next turn is likely to be
 	// refused mid-flight, and the switch only helps sessions started after it. Raise it here if you
@@ -85,6 +92,49 @@ type monitor struct {
 	// Set when rotation moved off the preferred account, so vibemon knows it may come home later.
 	// A manual switch clears it: an explicit choice outranks the preference.
 	roamed bool
+	// Per-account "do not call before" state, so one failing account cannot keep hammering the API.
+	backoff map[string]backoffState
+}
+
+type backoffState struct {
+	until    time.Time
+	failures int
+	reason   string
+}
+
+// penalise records a failed fetch and returns how long that account is now benched. The server's
+// own Retry-After wins over our guess whenever it sends one.
+func (m *monitor) penalise(uuid string, err error) time.Duration {
+	if m.backoff == nil {
+		m.backoff = map[string]backoffState{}
+	}
+	s := m.backoff[uuid]
+	s.failures++
+
+	wait := backoffBase << min(s.failures-1, 8)
+	var rl *rateLimitError
+	if errors.As(err, &rl) {
+		s.reason = "rate limited"
+		if rl.RetryAfter > 0 {
+			wait = rl.RetryAfter
+		}
+	} else {
+		s.reason = truncate(err.Error(), 90)
+	}
+	wait = min(wait, backoffCap)
+
+	s.until = time.Now().Add(wait)
+	m.backoff[uuid] = s
+	return wait
+}
+
+// benched reports whether an account is still serving a backoff, and for how much longer.
+func (m *monitor) benched(uuid string) (backoffState, bool) {
+	s, ok := m.backoff[uuid]
+	if !ok || time.Now().After(s.until) {
+		return backoffState{}, false
+	}
+	return s, true
 }
 
 // prefsPath is a plain file rather than a keychain item: none of this is secret, and a corrupt or
@@ -282,15 +332,24 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 			Plan: a.planLabel(), Active: isActive, NeedsReauth: a.NeedsReauth,
 			Preferred: a.UUID == m.preferred,
 		}
-		if isActive || includeParked {
+		switch state, waiting := m.benched(a.UUID); {
+		case waiting:
+			// Still serving a backoff: show the last good numbers rather than hammering the API.
+			pa.Usage = previous[a.UUID]
+			pa.Error = fmt.Sprintf("%s — retrying in %s", state.reason,
+				time.Until(state.until).Round(time.Second))
+		case isActive || includeParked:
 			u, err := usageFor(v, a, isActive)
 			if err != nil {
-				pa.Error = err.Error()
+				wait := m.penalise(a.UUID, err)
 				pa.Usage = previous[a.UUID] // keep the last good numbers on screen
+				pa.Error = fmt.Sprintf("%s — retrying in %s",
+					truncate(err.Error(), 90), wait.Round(time.Second))
 			} else {
+				delete(m.backoff, a.UUID)
 				pa.Usage = &u
 			}
-		} else {
+		default:
 			pa.Usage = previous[a.UUID]
 		}
 		pa.NeedsReauth = a.NeedsReauth
