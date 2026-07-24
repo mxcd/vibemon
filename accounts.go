@@ -1,0 +1,410 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	ccService    = "Claude Code-credentials"
+	vaultService = "vibemon-accounts"
+	oauthKey     = "claudeAiOauth"
+)
+
+// OAuth mirrors the claudeAiOauth object inside Claude Code's keychain blob. Field names and
+// casing must match exactly — Claude Code reads this back.
+type OAuth struct {
+	AccessToken           string   `json:"accessToken"`
+	RefreshToken          string   `json:"refreshToken"`
+	ExpiresAt             int64    `json:"expiresAt,omitempty"`
+	RefreshTokenExpiresAt int64    `json:"refreshTokenExpiresAt,omitempty"`
+	Scopes                []string `json:"scopes,omitempty"`
+	SubscriptionType      string   `json:"subscriptionType,omitempty"`
+	RateLimitTier         string   `json:"rateLimitTier,omitempty"`
+}
+
+func (o OAuth) expiresSoon() bool {
+	if o.ExpiresAt == 0 {
+		return true
+	}
+	return time.UnixMilli(o.ExpiresAt).Before(time.Now().Add(5 * time.Minute))
+}
+
+// Account is one stored Claude identity.
+type Account struct {
+	UUID         string          `json:"uuid"`
+	Email        string          `json:"email"`
+	Label        string          `json:"label"`
+	OrgName      string          `json:"orgName,omitempty"`
+	Plan         string          `json:"plan,omitempty"`
+	RateTier     string          `json:"rateTier,omitempty"`
+	SeatTier     string          `json:"seatTier,omitempty"`
+	OAuth        OAuth           `json:"oauth"`
+	UserID       string          `json:"userID,omitempty"`
+	OAuthAccount json.RawMessage `json:"oauthAccount,omitempty"`
+	NeedsReauth  bool            `json:"needsReauth,omitempty"`
+	CapturedAt   time.Time       `json:"capturedAt"`
+}
+
+// planLabel renders the subscription in the terms Anthropic bills in: a team seat tier when there
+// is one, otherwise the rate limit multiplier that actually governs the numbers on screen.
+func (a *Account) planLabel() string {
+	if seat := strings.ToLower(a.SeatTier); seat != "" {
+		switch seat {
+		case "premium":
+			return "Team · Premium seat"
+		case "standard":
+			return "Team · Standard seat"
+		default:
+			return "Team · " + seat + " seat"
+		}
+	}
+	tier := strings.ToLower(a.RateTier)
+	switch {
+	case strings.Contains(tier, "max_20x"):
+		return "Max 20×"
+	case strings.Contains(tier, "max_5x"):
+		return "Max 5×"
+	case strings.Contains(tier, "pro"):
+		return "Pro"
+	case strings.Contains(tier, "zero"), strings.Contains(tier, "free"):
+		return "Free"
+	}
+	// Unknown tier: fall back to the org type rather than invent a label.
+	switch strings.ToLower(a.Plan) {
+	case "claude_max":
+		return "Max"
+	case "claude_pro":
+		return "Pro"
+	case "claude_team":
+		return "Team"
+	case "claude_enterprise":
+		return "Enterprise"
+	}
+	return a.Plan
+}
+
+type Vault map[string]*Account
+
+func loadVault() (Vault, error) {
+	raw, err := keychainRead(vaultService)
+	if err != nil {
+		return Vault{}, nil // no vault yet is not an error
+	}
+	v := Vault{}
+	if strings.TrimSpace(raw) == "" {
+		return v, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, fmt.Errorf("vault is corrupt (%w) — discard it with "+
+			"`security delete-generic-password -s %s` and re-run `vibemon capture`", err, vaultService)
+	}
+	return v, nil
+}
+
+func saveVault(v Vault) error {
+	blob, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return keychainWrite(vaultService, string(blob))
+}
+
+func (v Vault) sorted() []*Account {
+	out := make([]*Account, 0, len(v))
+	for _, a := range v {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	return out
+}
+
+// --- Claude Code state -------------------------------------------------------
+
+// readCCBlob returns Claude Code's keychain payload as raw keys so that everything we do not
+// understand — most importantly the mcpOAuth map holding every MCP server token — survives a
+// round trip untouched.
+func readCCBlob() (map[string]json.RawMessage, error) {
+	raw, err := keychainRead(ccService)
+	if err != nil {
+		return nil, fmt.Errorf("read Claude Code credentials: %w", err)
+	}
+	blob := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(raw), &blob); err != nil {
+		return nil, fmt.Errorf("Claude Code credentials are not valid JSON: %w", err)
+	}
+	return blob, nil
+}
+
+func ccOAuth() (OAuth, error) {
+	blob, err := readCCBlob()
+	if err != nil {
+		return OAuth{}, err
+	}
+	return oauthFromBlob(blob)
+}
+
+func oauthFromBlob(blob map[string]json.RawMessage) (OAuth, error) {
+	raw, ok := blob[oauthKey]
+	if !ok {
+		return OAuth{}, fmt.Errorf("no %s in Claude Code credentials — is Claude Code logged in?", oauthKey)
+	}
+	var o OAuth
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return OAuth{}, fmt.Errorf("decode %s: %w", oauthKey, err)
+	}
+	if o.AccessToken == "" {
+		return OAuth{}, fmt.Errorf("%s carries no accessToken", oauthKey)
+	}
+	return o, nil
+}
+
+// swapOAuth replaces only the claudeAiOauth key and re-encodes. Every other key — mcpOAuth above
+// all — is copied through as the exact bytes it arrived as. This is the destructive path: getting
+// it wrong drops every MCP server token the user has authorised.
+func swapOAuth(blob map[string]json.RawMessage, o OAuth) ([]byte, error) {
+	encoded, err := json.Marshal(o)
+	if err != nil {
+		return nil, err
+	}
+	next := make(map[string]json.RawMessage, len(blob)+1)
+	for k, v := range blob {
+		next[k] = v
+	}
+	next[oauthKey] = encoded
+	return json.Marshal(next)
+}
+
+func claudeJSONPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".claude.json")
+}
+
+// patchClaudeJSON rewrites only oauthAccount and userID, preserving every other key byte-for-byte.
+// The file is re-read immediately before writing because live Claude Code sessions rewrite it
+// constantly, and it is replaced atomically so a crash mid-write cannot truncate it.
+func patchClaudeJSON(a *Account) error {
+	path := claudeJSONPath()
+	current, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to patch; Claude Code will recreate it
+		}
+		return err
+	}
+	doc := map[string]json.RawMessage{}
+	if err := json.Unmarshal(current, &doc); err != nil {
+		return fmt.Errorf("%s is not valid JSON: %w", path, err)
+	}
+	if len(a.OAuthAccount) > 0 {
+		doc["oauthAccount"] = a.OAuthAccount
+	}
+	if a.UserID != "" {
+		encoded, err := json.Marshal(a.UserID)
+		if err != nil {
+			return err
+		}
+		doc["userID"] = encoded
+	}
+	next, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".claude.json.vibemon-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(next); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+func readClaudeJSONIdentity() (userID string, oauthAccount json.RawMessage) {
+	current, err := os.ReadFile(claudeJSONPath())
+	if err != nil {
+		return "", nil
+	}
+	doc := map[string]json.RawMessage{}
+	if json.Unmarshal(current, &doc) != nil {
+		return "", nil
+	}
+	json.Unmarshal(doc["userID"], &userID)
+	return userID, doc["oauthAccount"]
+}
+
+func claudeSessionsRunning() int {
+	out, err := exec.Command("/usr/bin/pgrep", "-f", "claude").Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// --- operations --------------------------------------------------------------
+
+// capture files whatever account Claude Code is currently logged into away in the vault.
+func capture() (*Account, error) {
+	o, err := ccOAuth()
+	if err != nil {
+		return nil, err
+	}
+	p, err := fetchProfile(o.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("identify current account: %w", err)
+	}
+	userID, oauthAccount := readClaudeJSONIdentity()
+	label := p.Account.DisplayName
+	if label == "" {
+		label = p.Account.Email
+	}
+	a := &Account{
+		UUID:         p.Account.UUID,
+		Email:        p.Account.Email,
+		Label:        label,
+		OrgName:      p.Organization.Name,
+		Plan:         p.Organization.OrganizationType,
+		RateTier:     p.Organization.RateLimitTier,
+		SeatTier:     p.Organization.SeatTier,
+		OAuth:        o,
+		UserID:       userID,
+		OAuthAccount: oauthAccount,
+		CapturedAt:   time.Now(),
+	}
+	v, err := loadVault()
+	if err != nil {
+		return nil, err
+	}
+	v[a.UUID] = a
+	if err := saveVault(v); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// activeUUID reports which stored account Claude Code is currently using, matched on access token.
+func activeUUID(v Vault) string {
+	o, err := ccOAuth()
+	if err != nil {
+		return ""
+	}
+	for uuid, a := range v {
+		if a.OAuth.AccessToken == o.AccessToken {
+			return uuid
+		}
+	}
+	return ""
+}
+
+// switchTo makes target the account Claude Code will use on its next start.
+func switchTo(v Vault, uuid string) error {
+	target, ok := v[uuid]
+	if !ok {
+		return fmt.Errorf("no stored account with uuid %s", uuid)
+	}
+	blob, err := readCCBlob()
+	if err != nil {
+		return err
+	}
+	original, err := keychainRead(ccService)
+	if err != nil {
+		return err
+	}
+
+	// Claude Code refreshes the outgoing account's tokens behind our back; re-capture them before
+	// they are overwritten, or the vault keeps a refresh token that is already dead.
+	if outgoing, err := oauthFromBlob(blob); err == nil {
+		for id, a := range v {
+			if a.OAuth.AccessToken == outgoing.AccessToken && id != uuid {
+				a.OAuth = outgoing
+			}
+		}
+	}
+
+	next, err := swapOAuth(blob, target.OAuth)
+	if err != nil {
+		return err
+	}
+	if err := keychainWrite(ccService, string(next)); err != nil {
+		// keychainWrite verifies before returning, so a failure here means the item may be in an
+		// unknown state. Put back exactly what was there.
+		if restoreErr := keychainWrite(ccService, original); restoreErr != nil {
+			return fmt.Errorf("switch failed (%w) AND restore failed (%v) — run `claude /login`", err, restoreErr)
+		}
+		return fmt.Errorf("switch failed, previous credentials restored: %w", err)
+	}
+	if err := patchClaudeJSON(target); err != nil {
+		return fmt.Errorf("credentials switched but ~/.claude.json patch failed: %w", err)
+	}
+	return saveVault(v)
+}
+
+// forget drops an account from the vault. Claude Code's own credentials are untouched: forgetting
+// the account you are signed into only means vibemon stops tracking it, not that you are logged out.
+func forget(v Vault, uuid string) error {
+	if _, ok := v[uuid]; !ok {
+		return fmt.Errorf("no stored account with uuid %s", uuid)
+	}
+	delete(v, uuid)
+	if len(v) == 0 {
+		// An empty map would round-trip as "{}", which loadVault reads back fine — but dropping the
+		// item entirely leaves no stale secret sitting in the keychain.
+		_ = exec.Command("/usr/bin/security", "delete-generic-password", "-s", vaultService).Run()
+		return nil
+	}
+	return saveVault(v)
+}
+
+// usageFor fetches usage for one account, refreshing parked tokens as needed. The active account
+// is never refreshed here — Claude Code owns those tokens and rotation could log the user out.
+func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
+	token := a.OAuth.AccessToken
+	if isActive {
+		if o, err := ccOAuth(); err == nil {
+			token = o.AccessToken
+			a.OAuth = o
+		}
+	} else if a.OAuth.expiresSoon() {
+		refreshed, err := refreshToken(a.OAuth.RefreshToken)
+		if err != nil {
+			a.NeedsReauth = errors.Is(err, errNeedsReauth)
+			return Usage{}, err
+		}
+		refreshed.Scopes = a.OAuth.Scopes
+		refreshed.SubscriptionType = a.OAuth.SubscriptionType
+		refreshed.RateLimitTier = a.OAuth.RateLimitTier
+		a.OAuth = refreshed
+		a.NeedsReauth = false
+		token = refreshed.AccessToken
+		if err := saveVault(v); err != nil {
+			return Usage{}, err
+		}
+	}
+	u, err := fetchUsage(token)
+	if err != nil {
+		a.NeedsReauth = errors.Is(err, errNeedsReauth)
+		return Usage{}, err
+	}
+	a.NeedsReauth = false
+	return u, nil
+}

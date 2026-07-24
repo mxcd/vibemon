@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vibemon</title>
+<style>
+  :root {
+    --bg: #070d09;
+    --phosphor: #46f08a;
+    --phosphor-dim: #2b8f56;
+    --warning: #f0c34a;
+    --critical: #ff6b5e;
+    --rule: #16301f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--phosphor);
+    font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 14px 16px 12px;
+    overflow: hidden;
+    text-shadow: 0 0 6px rgba(70, 240, 138, .35);
+    user-select: none;
+    -webkit-user-select: none;
+    /* Column layout so the account list absorbs the slack and the footer is never pushed off. */
+    display: flex;
+    flex-direction: column;
+  }
+  #body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  /* Scanlines + a soft vignette: the whole point of the thing. */
+  body::after {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,.22) 0 1px, transparent 1px 3px),
+      radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.5) 100%);
+  }
+
+  header { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--rule); padding-bottom: 8px; flex: none; }
+  /* min-width:0 or a long address refuses to shrink and shoves the plan label out of the window. */
+  header .who { font-weight: 600; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+  header .plan { color: var(--phosphor-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; flex: none; white-space: nowrap; }
+
+  .gauges { padding: 12px 0 4px; flex: none; }
+  .gauge { margin-bottom: 12px; }
+  .gauge .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+  .gauge .name { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phosphor-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gauge .pct { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .gauge .reset { font-size: 10px; color: var(--phosphor-dim); font-variant-numeric: tabular-nums; }
+  .bar { height: 7px; background: rgba(70,240,138,.10); border: 1px solid var(--rule); position: relative; overflow: hidden; }
+  .bar i {
+    display: block; height: 100%; background: var(--phosphor);
+    box-shadow: 0 0 8px rgba(70,240,138,.65);
+    transition: width .5s ease;
+  }
+  .warning .pct, .warning .reset { color: var(--warning); }
+  .warning .bar i { background: var(--warning); box-shadow: 0 0 8px rgba(240,195,74,.65); }
+  .critical .pct, .critical .reset { color: var(--critical); }
+  .critical .bar i { background: var(--critical); box-shadow: 0 0 8px rgba(255,107,94,.7); }
+
+  .accounts { border-top: 1px solid var(--rule); padding-top: 8px; flex: 1; min-height: 0; overflow-y: auto; }
+  .accounts h2 { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phosphor-dim); margin-bottom: 5px; }
+  .acct {
+    display: flex; align-items: center; gap: 7px; padding: 4px 6px; cursor: pointer;
+    border: 1px solid transparent; border-radius: 2px;
+  }
+  .acct:hover { border-color: var(--rule); background: rgba(70,240,138,.06); }
+  .acct .dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--phosphor-dim); flex: none; }
+  .acct.active .dot { background: var(--phosphor); box-shadow: 0 0 6px var(--phosphor); border-color: var(--phosphor); }
+  .acct .who { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+  .acct .mail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acct .sub { color: var(--phosphor-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .acct .nums { color: var(--phosphor-dim); font-variant-numeric: tabular-nums; flex: none; align-self: flex-start; }
+  .acct .badge { color: var(--warning); font-size: 10px; flex: none; align-self: flex-start; }
+  .acct.active { cursor: default; }
+  .acct .kill {
+    flex: none; align-self: flex-start; width: 14px; text-align: center; line-height: 1;
+    color: var(--phosphor-dim); opacity: 0; cursor: pointer; font-size: 13px;
+  }
+  .acct:hover .kill { opacity: .65; }
+  .acct .kill:hover { opacity: 1; color: var(--critical); }
+
+  footer { border-top: 1px solid var(--rule); margin-top: 8px; padding-top: 8px; display: flex; align-items: center; gap: 10px; flex: none; }
+  button {
+    background: none; border: 1px solid var(--rule); color: var(--phosphor-dim);
+    font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    padding: 3px 7px; cursor: pointer; border-radius: 2px;
+  }
+  button:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+  .stamp { margin-left: auto; color: var(--phosphor-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .notice { color: var(--warning); font-size: 10px; padding: 6px 0 0; line-height: 1.4; }
+  .empty { padding: 26px 4px; color: var(--phosphor-dim); text-align: center; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="who" id="who">connecting…</span>
+    <span class="plan" id="plan"></span>
+  </header>
+
+  <div id="body">
+    <div class="gauges" id="gauges"></div>
+    <div class="accounts" id="accounts"></div>
+  </div>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <footer>
+    <button id="capture">Capture</button>
+    <button id="refresh">Refresh</button>
+    <button id="quit">Quit</button>
+    <span class="stamp" id="stamp"></span>
+  </footer>
+
+<script type="module">
+const { Events } = await import('/wails/runtime.js');
+
+let state = { accounts: [] };
+
+const el = id => document.getElementById(id);
+const send = (name, data) => Events.Emit(name, data ?? null);
+
+function severityClass(g) {
+  if (!g) return '';
+  if (g.severity === 'critical' || g.severity === 'severe' || g.percent >= 95) return 'critical';
+  if (g.severity === 'warning' || g.percent >= 80) return 'warning';
+  return '';
+}
+
+function countdown(iso) {
+  if (!iso) return '';
+  const ms = new Date(iso) - Date.now();
+  if (ms <= 0) return 'resetting';
+  const m = Math.floor(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${String(m % 60).padStart(2, '0')}m`;
+  return `${m}m`;
+}
+
+function gauge(name, g) {
+  if (!g) return '';
+  const pct = Math.max(0, Math.min(100, g.percent));
+  return `<div class="gauge ${severityClass(g)}">
+    <div class="top">
+      <span class="name">${name}</span>
+      <span class="pct">${g.percent.toFixed(0)}%</span>
+    </div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="top" style="margin:4px 0 0">
+      <span class="reset" data-reset="${g.resetsAt || ''}" data-prefix="resets in ">${g.resetsAt ? 'resets in ' + countdown(g.resetsAt) : ''}</span>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const accounts = state.accounts || [];
+  const active = accounts.find(a => a.active);
+
+  el('notice').hidden = !state.notice;
+  el('notice').textContent = state.notice || '';
+  el('stamp').textContent = state.updatedAt
+    ? new Date(state.updatedAt).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '';
+
+  if (!accounts.length) {
+    el('who').textContent = 'no account';
+    el('plan').textContent = '';
+    el('body').innerHTML = `<div class="empty">No accounts stored yet.<br>Log in with Claude Code,<br>then press Capture.</div>`;
+    return;
+  }
+
+  if (!el('gauges')) {
+    el('body').innerHTML = `<div class="gauges" id="gauges"></div><div class="accounts" id="accounts"></div>`;
+  }
+
+  el('who').textContent = active ? active.email : 'unknown account';
+  el('plan').textContent = active ? (active.plan || '') : '';
+
+  const u = active && active.usage;
+  el('gauges').innerHTML = active && active.needsReauth
+    ? `<div class="empty">This account needs a fresh login.<br>Run <b>claude /login</b>, then Capture.</div>`
+    : u
+      ? gauge('Session · 5h', u.session) + gauge('Weekly · 7d', u.weekly) + (u.scoped ? gauge(u.scoped.label + ' · 7d', u.scoped) : '')
+      : `<div class="empty">${active && active.error ? active.error : 'waiting for usage…'}</div>`;
+
+  el('accounts').innerHTML = '<h2>Accounts</h2>' + accounts.map(a => {
+    const nums = a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '—';
+    const right = a.needsReauth ? `<span class="badge">needs login</span>` : `<span class="nums">${nums}</span>`;
+    const resets = a.usage
+      ? `<span data-reset="${a.usage.session.resetsAt || ''}">${countdown(a.usage.session.resetsAt)}</span>`
+        + ` · <span data-reset="${a.usage.weekly.resetsAt || ''}">${countdown(a.usage.weekly.resetsAt)}</span>`
+      : '';
+    const sub = a.needsReauth ? 'run claude auth login' : (resets ? 'resets ' + resets : '');
+    const title = [a.plan, a.orgName].filter(Boolean).join(' — ');
+    return `<div class="acct ${a.active ? 'active' : ''}" data-uuid="${a.uuid}" title="${title}">
+      <span class="dot"></span>
+      <span class="who"><span class="mail">${a.preferred ? '★ ' : ''}${a.email}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</span>
+      ${right}
+      <span class="kill" data-kill="${a.uuid}" title="Forget this account">×</span>
+    </div>`;
+  }).join('');
+
+  el('accounts').querySelectorAll('.acct:not(.active)').forEach(node => {
+    node.onclick = () => send('panel:switch', node.dataset.uuid);
+  });
+  el('accounts').querySelectorAll('.kill').forEach(node => {
+    node.onclick = e => { e.stopPropagation(); send('panel:remove', node.dataset.kill); };
+  });
+}
+
+// Go may deliver the payload bare or wrapped in a single-element array depending on the emit path.
+Events.On('state', e => {
+  const d = e.data;
+  state = Array.isArray(d) ? d[0] : d;
+  render();
+});
+
+el('capture').onclick = () => send('panel:capture');
+el('refresh').onclick = () => send('panel:refresh');
+el('quit').onclick = () => send('panel:quit');
+
+// Tick the countdowns locally so they stay honest between the 60s polls.
+setInterval(() => {
+  document.querySelectorAll('[data-reset]').forEach(n => {
+    if (n.dataset.reset) n.textContent = (n.dataset.prefix || '') + countdown(n.dataset.reset);
+  });
+}, 1000);
+
+send('panel:ready');
+</script>
+</body>
+</html>
