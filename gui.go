@@ -150,10 +150,14 @@ func (m *monitor) benched(uuid string) (backoffState, bool) {
 	return s, true
 }
 
-// prefs snapshots the preferences that live on the monitor. Caller must hold m.mu.
+// prefs lays the preferences the monitor owns over whatever is on disk right now. The account
+// orders and project policies are written by the CLI too (`vibemon codex add` appends to the Codex
+// one), so saving an in-memory copy from a tray toggle would quietly undo them.
+// Caller must hold m.mu.
 func (m *monitor) prefs() prefs {
-	return prefs{Density: m.density, AutoSwitch: m.autoSwitch, Preferred: m.preferred,
-		Order: m.order, CodexOrder: m.codexOrder, Projects: m.projects}
+	p := loadPrefs()
+	p.Density, p.AutoSwitch, p.Preferred = m.density, m.autoSwitch, m.preferred
+	return p
 }
 
 func runGUI() error {
@@ -292,6 +296,9 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 		return false
 	}
 	m.vault = v
+	// The CLI writes these while the app runs; the panel and the settings window show them.
+	saved := loadPrefs()
+	m.order, m.codexOrder, m.projects = saved.Order, saved.CodexOrder, saved.Projects
 	if len(v) == 0 {
 		m.state = panelState{Notice: "No accounts yet — log in with Claude Code, then Capture.", UpdatedAt: time.Now()}
 		m.publish()
@@ -747,6 +754,7 @@ func (m *monitor) setPolicy(data any) {
 	m.order, m.codexOrder, m.projects = in.Order, in.CodexOrder, in.Projects
 	m.state.Order, m.state.CodexOrder, m.state.Projects = in.Order, in.CodexOrder, in.Projects
 	p := m.prefs()
+	p.Order, p.CodexOrder, p.Projects = in.Order, in.CodexOrder, in.Projects
 	m.mu.Unlock()
 	if err := savePrefs(p); err != nil {
 		m.notify("could not save settings: " + err.Error())
