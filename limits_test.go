@@ -31,6 +31,10 @@ func TestClassify(t *testing.T) {
 		{"prose mentions too long", "The prompt is too long for that, so I trimmed it.", "", 0, outOK, ""},
 		{"stderr-only launch failure", "", "error: unknown option '--bogus'", 1, outFailed, "error: unknown option '--bogus'"},
 		{"hit your model limit", "You've hit your Opus limit · resets 3pm", "", 1, outModelCap, "opus"},
+		{"codex usage limit", "", "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 15th, 2026 7:59 PM.", 1, outLimit, ""},
+		{"codex out of credits", "", "ERROR: You're out of credits.", 1, outLimit, ""},
+		{"codex not logged in", "", "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses", 1, outAuth, ""},
+		{"codex prose about limits", "The usage limit is documented in the README.", "", 0, outOK, ""},
 	}
 	for _, tc := range cases {
 		got, detail := classify(tc.stdout, tc.serr, tc.exit)
@@ -73,6 +77,8 @@ func TestParseReset(t *testing.T) {
 		{"limit · resets 10:00am", time.Date(2026, 9, 8, 10, 0, 0, 0, berlin)},
 		{"resets Sep 14th, 2026 12:22 AM", time.Date(2026, 9, 14, 0, 22, 0, 0, berlin)},
 		{"resets 9:40am (Mars/Olympus)", time.Date(2026, 9, 9, 9, 40, 0, 0, berlin)},
+		{"purchase more credits or try again at Sep 15th, 2026 7:59 PM.", time.Date(2026, 9, 15, 19, 59, 0, 0, berlin)},
+		{"try again at 11:59 PM", time.Date(2026, 9, 8, 23, 59, 0, 0, berlin)},
 	}
 	// Across the DST switch the next 9:00 is 25 hours away, not 24.
 	dstEve := time.Date(2026, 10, 24, 10, 0, 0, 0, berlin)
@@ -111,5 +117,16 @@ func TestNextModel(t *testing.T) {
 	}
 	if got := nextModel("opus", []string{"opus", "haiku"}); got != "haiku" {
 		t.Errorf("custom order: want haiku, got %q", got)
+	}
+}
+
+// codex names its reset in the same line as the limit; without it the bench would be an hour and
+// the account would be retried three days early, four times an hour.
+func TestBenchForCodexLimit(t *testing.T) {
+	const msg = "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 15th, 2026 7:59 PM."
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.Local)
+	want := time.Date(2026, 9, 15, 20, 1, 0, 0, time.Local)
+	if got := benchFor(msg, now); !got.Equal(want) {
+		t.Errorf("bench until: want %s, got %s", want, got)
 	}
 }

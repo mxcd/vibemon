@@ -48,8 +48,8 @@ var (
 	reTooLong   = regexp.MustCompile(`(?i)prompt is too long`)
 	reNoSession = regexp.MustCompile(`(?i)no conversation found with session id`)
 	reReached   = regexp.MustCompile(`(?i)(?:reached|hit) your (\w+)(?: usage)? limit`)
-	reLimit     = regexp.MustCompile(`(?i)(?:hit|reached) your\b[^.\n]*\blimit|usage limit|session limit|weekly limit`)
-	reAuth      = regexp.MustCompile(`(?i)oauth 401|"authentication_error"|invalid authentication|token (?:is )?(?:expired|invalid|revoked)`)
+	reLimit     = regexp.MustCompile(`(?i)(?:hit|reached) your\b[^.\n]*\blimit|usage limit|session limit|weekly limit|out of credits`)
+	reAuth      = regexp.MustCompile(`(?i)oauth 401|"authentication_error"|invalid authentication|token (?:is )?(?:expired|invalid|revoked)|401 unauthorized|missing bearer`)
 )
 
 // classify inspects stdout and stderr together: the limit JSON lands on stdout, launch errors on
@@ -59,6 +59,14 @@ var (
 //
 // The message patterns only run on a failed turn (non-zero exit or is_error in the JSON result).
 // A successful answer that merely talks about usage limits is an answer, not a limit.
+// codex prints its own version on stderr with exit 1 and names the reset as "try again at <date>";
+// a never logged in CODEX_HOME says "401 Unauthorized: Missing bearer" instead. The bare phrase
+// "not logged in" is deliberately not a pattern: only `codex login status` prints it, while a
+// failed turn quoting some other tool's "not logged in" would bench a healthy account for a day.
+//
+// ponytail: "You've hit your usage limit for <model>" benches the whole Codex account, though
+// another model on it might still run. Reviews use one model, so the cost is a bench a few hours
+// too wide; upgrade path is a Codex outModelCap driven by additional_rate_limits.
 func classify(stdout, stderr string, exitCode int) (outcome, string) {
 	failed := exitCode != 0 || strings.Contains(stdout, `"is_error":true`)
 	if !failed {
@@ -102,8 +110,9 @@ func firstLine(text, containing string) string {
 	return strings.TrimSpace(text)
 }
 
-// "resets 9:40am (Europe/Rome)", "resets 2:40pm", "resets at 15:00", "resets Sep 14th, 2026 12:22 AM"
-var reReset = regexp.MustCompile(`(?i)resets?\s+(?:at\s+)?` +
+// "resets 9:40am (Europe/Rome)", "resets 2:40pm", "resets at 15:00", "resets Sep 14th, 2026 12:22 AM",
+// and codex's "try again at Sep 15th, 2026 7:59 PM"
+var reReset = regexp.MustCompile(`(?i)(?:resets?|try again)\s+(?:at\s+|on\s+)?` +
 	`((?:[A-Z][a-z]{2,8}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4},? )?\d{1,2}(?::\d{2})?\s*(?:am|pm)?)` +
 	`(?:\s*\(([^)]+)\))?`)
 
