@@ -59,7 +59,8 @@
 
   <h2>Accounts</h2>
   <p class="hint">A <b>login</b> (captured from Claude Code) gives usage numbers and interactive switching.
-  A <b>token</b> from <b>claude setup-token</b> is what headless and per-project runs use; it lasts a year and cannot report usage.</p>
+  A <b>token</b> from <b>claude setup-token</b> is what headless and per-project runs use; it lasts a year and cannot report usage.
+  ChatGPT accounts are added with <b>vibemon codex add</b> and run under <b>vibemon exec --kind codex</b>; for them both columns mean the login in their own CODEX_HOME.</p>
   <table id="accounts"></table>
   <div class="row">
     <input type="text" id="new-email" placeholder="email of the account the token belongs to">
@@ -67,9 +68,13 @@
     <button id="add-token">Add token</button>
   </div>
 
-  <h2>Default order</h2>
+  <h2>Default order — Claude</h2>
   <p class="hint">Used wherever no project matches. Untick to leave an account out of automatic picking.</p>
   <ul class="order" id="order"></ul>
+
+  <h2>Default order — Codex</h2>
+  <p class="hint">The same for ChatGPT accounts: <b>vibemon exec --kind codex</b> fills them up in this order.</p>
+  <ul class="order" id="codex-order"></ul>
 
   <h2>Projects</h2>
   <p class="hint">Longest matching path wins, so worktrees under a project inherit its accounts.</p>
@@ -92,25 +97,27 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 
 let state = { accounts: [] };
 // Working copy of the policy; only Save pushes it to Go.
-let draft = { order: [], projects: [] };
+let draft = { order: [], codexOrder: [], projects: [] };
 let dirty = false;
 
 const byKey = () => Object.fromEntries(state.accounts.map(a => [a.uuid, a]));
 
-// An ordered list plus every account not in it (unticked), so nothing is invisible.
-function orderRows(list) {
+// An ordered list plus every account of that kind not in it (unticked), so nothing is invisible.
+function orderRows(list, kind) {
   const known = new Set(list);
-  return [...list.filter(k => byKey()[k]), ...state.accounts.map(a => a.uuid).filter(k => !known.has(k)).map(k => '!' + k)];
+  const of = a => kind ? (a.kind || 'claude') === kind : true;
+  return [...list.filter(k => byKey()[k] && of(byKey()[k])),
+          ...state.accounts.filter(a => of(a) && !known.has(a.uuid)).map(a => '!' + a.uuid)];
 }
 
-function renderOrderList(container, list, onChange) {
-  const rows = orderRows(list);
+function renderOrderList(container, list, onChange, kind) {
+  const rows = orderRows(list, kind);
   container.innerHTML = rows.map((k, i) => {
     const off = k.startsWith('!'); const key = off ? k.slice(1) : k; const a = byKey()[key];
     return `<li class="${off ? 'off' : ''}" data-key="${esc(key)}">
       <input type="checkbox" ${off ? '' : 'checked'}>
       <span class="n">${off ? '' : i + 1}</span>
-      <span class="mail">${esc(a.email)}${a.hasToken ? '' : ' <span class="dim">(no token)</span>'}</span>
+      <span class="mail">${esc(a.email)}${(a.kind === 'codex') ? ' <span class="dim">(codex)</span>' : (a.hasToken ? '' : ' <span class="dim">(no token)</span>')}</span>
       <button class="mini" data-move="-1" ${off || i === 0 ? 'disabled' : ''}>↑</button>
       <button class="mini" data-move="1" ${off || i >= list.length - 1 ? 'disabled' : ''}>↓</button>
     </li>`;
@@ -133,18 +140,20 @@ function renderOrderList(container, list, onChange) {
 
 function render() {
   const fmt = t => t ? new Date(t).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
-  el('accounts').innerHTML = `<tr><th>account</th><th>plan</th><th>login</th><th>token</th><th>usage</th><th>turns/1h</th><th>benched</th></tr>` +
+  el('accounts').innerHTML = `<tr><th>account</th><th>kind</th><th>plan</th><th>login</th><th>token</th><th>usage</th><th>turns/1h</th><th>benched</th></tr>` +
     (state.accounts.map(a => `<tr>
       <td>${a.active ? '● ' : ''}${esc(a.email)}</td>
+      <td class="dim">${esc(a.kind || 'claude')}</td>
       <td class="dim">${esc(a.plan || '')}</td>
       <td class="${a.hasLogin ? '' : 'dim'}">${a.hasLogin ? (a.needsReauth ? '<span class="warn">needs login</span>' : 'yes') : 'no'}</td>
       <td class="${a.hasToken ? '' : 'warn'}">${a.hasToken ? 'yes' : 'missing'}</td>
       <td class="dim">${a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '-'}</td>
       <td class="dim">${a.turns || 0}</td>
       <td class="${a.benchedUntil ? 'warn' : 'dim'}" title="${esc(a.benchReason || '')}">${a.benchedUntil ? 'until ' + fmt(a.benchedUntil) : ''}</td>
-    </tr>`).join('') || '<tr><td class="empty" colspan="7">No accounts stored.</td></tr>');
+    </tr>`).join('') || '<tr><td class="empty" colspan="8">No accounts stored.</td></tr>');
 
-  renderOrderList(el('order'), draft.order, next => { draft.order = next; touch(); });
+  renderOrderList(el('order'), draft.order, next => { draft.order = next; touch(); }, 'claude');
+  renderOrderList(el('codex-order'), draft.codexOrder, next => { draft.codexOrder = next; touch(); }, 'codex');
 
   el('projects').innerHTML = '';
   if (!draft.projects.length) el('projects').innerHTML = '<div class="empty">No project policies. Everything uses the default order.</div>';
@@ -162,7 +171,11 @@ function render() {
 function touch() { dirty = true; render(); }
 
 function resetDraft() {
-  draft = { order: [...(state.order || [])], projects: (state.projects || []).map(p => ({ path: p.path, accounts: [...(p.accounts || [])] })) };
+  draft = {
+    order: [...(state.order || [])],
+    codexOrder: [...(state.codexOrder || [])],
+    projects: (state.projects || []).map(p => ({ path: p.path, accounts: [...(p.accounts || [])] })),
+  };
   dirty = false;
 }
 
@@ -187,7 +200,7 @@ el('add-project').onclick = () => {
   el('new-project').value = '';
   touch();
 };
-el('save').onclick = () => { Events.Emit('settings:policy', { order: draft.order, projects: draft.projects }); dirty = false; render(); };
+el('save').onclick = () => { Events.Emit('settings:policy', { order: draft.order, codexOrder: draft.codexOrder, projects: draft.projects }); dirty = false; render(); };
 el('revert').onclick = () => { resetDraft(); render(); };
 
 Events.Emit('panel:ready', null);
