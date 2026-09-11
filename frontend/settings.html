@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vibemon settings</title>
+<style>
+  :root {
+    --bg: #070d09; --phosphor: #46f08a; --phosphor-dim: #2b8f56;
+    --warning: #f0c34a; --critical: #ff6b5e; --rule: #16301f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--phosphor);
+    font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 16px 20px 24px; user-select: none; -webkit-user-select: none;
+  }
+  h1 { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--phosphor-dim); margin-bottom: 4px; }
+  h2 { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--phosphor-dim); margin: 22px 0 6px; border-bottom: 1px solid var(--rule); padding-bottom: 4px; }
+  p.hint { color: var(--phosphor-dim); font-size: 11px; margin-bottom: 8px; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 4px 6px; vertical-align: middle; font-variant-numeric: tabular-nums; }
+  th { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--phosphor-dim); font-weight: normal; }
+  tr:hover td { background: rgba(70,240,138,.05); }
+  td.dim, span.dim { color: var(--phosphor-dim); }
+  td.warn { color: var(--warning); }
+  input[type=text], input[type=password] {
+    background: rgba(70,240,138,.06); border: 1px solid var(--rule); color: var(--phosphor);
+    font: inherit; padding: 3px 6px; border-radius: 2px; width: 100%;
+  }
+  input:focus { outline: none; border-color: var(--phosphor-dim); }
+  button {
+    background: none; border: 1px solid var(--rule); color: var(--phosphor-dim);
+    font: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    padding: 3px 7px; cursor: pointer; border-radius: 2px; white-space: nowrap;
+  }
+  button:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+  button.mini { padding: 1px 5px; letter-spacing: 0; }
+  button.danger:hover { color: var(--critical); }
+  .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .row input { flex: 1; }
+  .order { list-style: none; }
+  .order li { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border: 1px solid transparent; }
+  .order li:hover { border-color: var(--rule); }
+  .order li .n { color: var(--phosphor-dim); width: 18px; }
+  .order li .mail { flex: 1; }
+  .order li.off .mail { color: var(--phosphor-dim); text-decoration: line-through; }
+  .project { border: 1px solid var(--rule); padding: 8px 10px; margin: 8px 0; }
+  .project .head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .project .head .path { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  footer { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--rule); margin-top: 20px; padding-top: 10px; display: flex; gap: 10px; align-items: center; }
+  .notice { color: var(--warning); font-size: 11px; margin-left: auto; }
+  .empty { color: var(--phosphor-dim); padding: 8px 6px; }
+</style>
+</head>
+<body>
+  <h1>vibemon settings</h1>
+  <p class="hint">Which accounts <b>vibemon exec</b> may run under, per project, in priority order.
+  exec takes the first account in the list that is neither benched by a limit nor over the ceiling.</p>
+
+  <h2>Accounts</h2>
+  <p class="hint">A <b>login</b> (captured from Claude Code) gives usage numbers and interactive switching.
+  A <b>token</b> from <b>claude setup-token</b> is what headless and per-project runs use; it lasts a year and cannot report usage.</p>
+  <table id="accounts"></table>
+  <div class="row">
+    <input type="text" id="new-email" placeholder="email of the account the token belongs to">
+    <input type="password" id="new-token" placeholder="paste sk-ant-oat… from claude setup-token">
+    <button id="add-token">Add token</button>
+  </div>
+
+  <h2>Default order</h2>
+  <p class="hint">Used wherever no project matches. Untick to leave an account out of automatic picking.</p>
+  <ul class="order" id="order"></ul>
+
+  <h2>Projects</h2>
+  <p class="hint">Longest matching path wins, so worktrees under a project inherit its accounts.</p>
+  <div id="projects"></div>
+  <div class="row">
+    <input type="text" id="new-project" placeholder="/Users/you/github.com/org/repo (or ~/...)">
+    <button id="add-project">Add project</button>
+  </div>
+
+  <footer>
+    <button id="save">Save</button>
+    <button id="revert">Revert</button>
+    <span class="notice" id="notice"></span>
+  </footer>
+
+<script type="module">
+const { Events } = await import('/wails/runtime.js');
+const el = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let state = { accounts: [] };
+// Working copy of the policy; only Save pushes it to Go.
+let draft = { order: [], projects: [] };
+let dirty = false;
+
+const byKey = () => Object.fromEntries(state.accounts.map(a => [a.uuid, a]));
+
+// An ordered list plus every account not in it (unticked), so nothing is invisible.
+function orderRows(list) {
+  const known = new Set(list);
+  return [...list.filter(k => byKey()[k]), ...state.accounts.map(a => a.uuid).filter(k => !known.has(k)).map(k => '!' + k)];
+}
+
+function renderOrderList(container, list, onChange) {
+  const rows = orderRows(list);
+  container.innerHTML = rows.map((k, i) => {
+    const off = k.startsWith('!'); const key = off ? k.slice(1) : k; const a = byKey()[key];
+    return `<li class="${off ? 'off' : ''}" data-key="${esc(key)}">
+      <input type="checkbox" ${off ? '' : 'checked'}>
+      <span class="n">${off ? '' : i + 1}</span>
+      <span class="mail">${esc(a.email)}${a.hasToken ? '' : ' <span class="dim">(no token)</span>'}</span>
+      <button class="mini" data-move="-1" ${off || i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="mini" data-move="1" ${off || i >= list.length - 1 ? 'disabled' : ''}>↓</button>
+    </li>`;
+  }).join('') || '<div class="empty">No accounts yet. Capture a login or add a token above.</div>';
+  container.querySelectorAll('li').forEach(li => {
+    const key = li.dataset.key;
+    li.querySelector('input').onchange = e => {
+      const next = list.filter(k => k !== key);
+      if (e.target.checked) next.push(key);
+      onChange(next);
+    };
+    li.querySelectorAll('[data-move]').forEach(b => b.onclick = () => {
+      const i = list.indexOf(key), j = i + Number(b.dataset.move);
+      if (i < 0 || j < 0 || j >= list.length) return;
+      const next = [...list]; [next[i], next[j]] = [next[j], next[i]];
+      onChange(next);
+    });
+  });
+}
+
+function render() {
+  const fmt = t => t ? new Date(t).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '';
+  el('accounts').innerHTML = `<tr><th>account</th><th>plan</th><th>login</th><th>token</th><th>usage</th><th>turns/1h</th><th>benched</th></tr>` +
+    (state.accounts.map(a => `<tr>
+      <td>${a.active ? '● ' : ''}${esc(a.email)}</td>
+      <td class="dim">${esc(a.plan || '')}</td>
+      <td class="${a.hasLogin ? '' : 'dim'}">${a.hasLogin ? (a.needsReauth ? '<span class="warn">needs login</span>' : 'yes') : 'no'}</td>
+      <td class="${a.hasToken ? '' : 'warn'}">${a.hasToken ? 'yes' : 'missing'}</td>
+      <td class="dim">${a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '-'}</td>
+      <td class="dim">${a.turns || 0}</td>
+      <td class="${a.benchedUntil ? 'warn' : 'dim'}" title="${esc(a.benchReason || '')}">${a.benchedUntil ? 'until ' + fmt(a.benchedUntil) : ''}</td>
+    </tr>`).join('') || '<tr><td class="empty" colspan="7">No accounts stored.</td></tr>');
+
+  renderOrderList(el('order'), draft.order, next => { draft.order = next; touch(); });
+
+  el('projects').innerHTML = '';
+  if (!draft.projects.length) el('projects').innerHTML = '<div class="empty">No project policies. Everything uses the default order.</div>';
+  draft.projects.forEach((p, i) => {
+    const box = document.createElement('div');
+    box.className = 'project';
+    box.innerHTML = `<div class="head"><span class="path" title="${esc(p.path)}">${esc(p.path)}</span><button class="mini danger">remove</button></div><ul class="order"></ul>`;
+    box.querySelector('button').onclick = () => { draft.projects.splice(i, 1); touch(); render(); };
+    renderOrderList(box.querySelector('ul'), p.accounts || [], next => { p.accounts = next; touch(); });
+    el('projects').appendChild(box);
+  });
+  el('save').disabled = !dirty;
+}
+
+function touch() { dirty = true; render(); }
+
+function resetDraft() {
+  draft = { order: [...(state.order || [])], projects: (state.projects || []).map(p => ({ path: p.path, accounts: [...(p.accounts || [])] })) };
+  dirty = false;
+}
+
+Events.On('state', e => {
+  const d = e.data; state = Array.isArray(d) ? d[0] : d;
+  state.accounts = state.accounts || [];
+  if (!dirty) resetDraft();
+  el('notice').textContent = state.notice || '';
+  render();
+});
+
+el('add-token').onclick = () => {
+  const email = el('new-email').value.trim(), token = el('new-token').value.trim();
+  if (!email || !token) { el('notice').textContent = 'email and token are both needed'; return; }
+  Events.Emit('settings:token', { email, token });
+  el('new-token').value = '';
+};
+el('add-project').onclick = () => {
+  const path = el('new-project').value.trim();
+  if (!path) return;
+  draft.projects.push({ path, accounts: [...draft.order] });
+  el('new-project').value = '';
+  touch();
+};
+el('save').onclick = () => { Events.Emit('settings:policy', { order: draft.order, projects: draft.projects }); dirty = false; render(); };
+el('revert').onclick = () => { resetDraft(); render(); };
+
+Events.Emit('panel:ready', null);
+</script>
+</body>
+</html>

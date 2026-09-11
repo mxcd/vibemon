@@ -1,5 +1,20 @@
 # Plan: headless multi-account runs with automatic switching
 
+> **Status 08.09.2026: implemented** (`exec.go`, `fleet.go`, `limits.go`, `prefs.go`, settings
+> window), with three departures from the design below, all forced by one finding: a
+> `claude setup-token` token is inference-only, so it can neither poll usage nor identify itself.
+>
+> 1. Accounts carry a separate headless token (`vibemon add-token`), stored in the vault. `exec`
+>    runs only on those; it never hands a login's access token to a child and never refreshes.
+> 2. Account choice is an ordered per-project policy (settings page), not a headroom sort. Order
+>    is priority; usage numbers (from the monitor's polling of the captured login, via `fleet.json`)
+>    and benches only skip entries. `--prefer` became `--account`.
+> 3. `exec` without `-p` is an interactive pass-through, so `vibemon exec` in a project directory
+>    is the per-project account switch. `token`/`pick` exist; fleet mode does not.
+>
+> `apiKeyHelper` was tested as an alternative broker pattern and rejected: Claude Code sends its
+> output as an API key and Anthropic answers 401 for an OAuth token.
+
 Written 08.09.2026 after the Paloma One overnight build (asolabs/paloma-one,
 `scripts/agents/run.sh`), where up to 15 headless `claude -p` agents ran for 27 hours across five
 accounts. The rotation logic lived in a bash script and learned every fact the hard way; vibemon

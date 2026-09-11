@@ -39,18 +39,22 @@ func (o OAuth) expiresSoon() bool {
 
 // Account is one stored Claude identity.
 type Account struct {
-	UUID         string          `json:"uuid"`
-	Email        string          `json:"email"`
-	Label        string          `json:"label"`
-	OrgName      string          `json:"orgName,omitempty"`
-	Plan         string          `json:"plan,omitempty"`
-	RateTier     string          `json:"rateTier,omitempty"`
-	SeatTier     string          `json:"seatTier,omitempty"`
-	OAuth        OAuth           `json:"oauth"`
-	UserID       string          `json:"userID,omitempty"`
-	OAuthAccount json.RawMessage `json:"oauthAccount,omitempty"`
-	NeedsReauth  bool            `json:"needsReauth,omitempty"`
-	CapturedAt   time.Time       `json:"capturedAt"`
+	UUID     string `json:"uuid"`
+	Email    string `json:"email"`
+	Label    string `json:"label"`
+	OrgName  string `json:"orgName,omitempty"`
+	Plan     string `json:"plan,omitempty"`
+	RateTier string `json:"rateTier,omitempty"`
+	SeatTier string `json:"seatTier,omitempty"`
+	OAuth    OAuth  `json:"oauth"`
+	// HeadlessToken is a `claude setup-token` token: inference-only, valid for a year, and what
+	// `vibemon exec` hands to child processes. It cannot poll usage or profile (403), so an account
+	// added by token alone is identified by the email the user typed.
+	HeadlessToken string          `json:"headlessToken,omitempty"`
+	UserID        string          `json:"userID,omitempty"`
+	OAuthAccount  json.RawMessage `json:"oauthAccount,omitempty"`
+	NeedsReauth   bool            `json:"needsReauth,omitempty"`
+	CapturedAt    time.Time       `json:"capturedAt"`
 }
 
 // planLabel renders the subscription in the terms Anthropic bills in: a team seat tier when there
@@ -96,7 +100,12 @@ type Vault map[string]*Account
 func loadVault() (Vault, error) {
 	raw, err := keychainRead(vaultService)
 	if err != nil {
-		return Vault{}, nil // no vault yet is not an error
+		// Only a missing item means "no vault yet". Any other failure (locked keychain, prompt
+		// denied) must not read as empty: the next save would replace every stored account.
+		if strings.Contains(err.Error(), "could not be found") {
+			return Vault{}, nil
+		}
+		return nil, err
 	}
 	v := Vault{}
 	if strings.TrimSpace(raw) == "" {
@@ -263,8 +272,41 @@ func claudeSessionsRunning() int {
 
 // --- operations --------------------------------------------------------------
 
+// errHeadlessOnly: the account was added by setup-token alone, so there is nothing to poll with.
+// Capture a login for the same email and the numbers appear.
+var errHeadlessOnly = errors.New("headless token only, no usage: capture a login for this email")
+
+// addHeadlessToken stores a setup-token on the account matching email, creating a token-only entry
+// keyed by the email when no captured login exists yet.
+func addHeadlessToken(v Vault, email, token string) (*Account, error) {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, "sk-ant-oat") {
+		return nil, fmt.Errorf("that does not look like a `claude setup-token` token (expected sk-ant-oat…)")
+	}
+	email = strings.TrimSpace(email)
+	if !strings.Contains(email, "@") {
+		return nil, fmt.Errorf("%q is not an email address", email)
+	}
+	a, err := findByEmail(v, email)
+	if err != nil {
+		key := strings.ToLower(email)
+		a = &Account{UUID: key, Email: email, Label: email, CapturedAt: time.Now()}
+		v[key] = a
+	}
+	a.HeadlessToken = token
+	// A fresh token lifts any "token rejected" bench the old one earned.
+	_, _ = updateFleet(func(st *fleetState) {
+		if b, ok := st.Bench[a.UUID]; ok && strings.HasPrefix(b.Reason, "token rejected") {
+			delete(st.Bench, a.UUID)
+		}
+	})
+	return a, saveVault(v)
+}
+
 // capture files whatever account Claude Code is currently logged into away in the vault.
 func capture() (*Account, error) {
+	unlock := lockVault()
+	defer unlock()
 	o, err := ccOAuth()
 	if err != nil {
 		return nil, err
@@ -295,6 +337,17 @@ func capture() (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A login capture for an email that was previously added by token alone: keep the token, drop
+	// the stub so the account exists once, under its real UUID.
+	for key, existing := range v {
+		if strings.EqualFold(existing.Email, a.Email) {
+			a.HeadlessToken = existing.HeadlessToken
+			if key != a.UUID {
+				delete(v, key)
+				migrateAccountKey(key, a.UUID)
+			}
+		}
+	}
 	v[a.UUID] = a
 	if err := saveVault(v); err != nil {
 		return nil, err
@@ -302,7 +355,10 @@ func capture() (*Account, error) {
 	return a, nil
 }
 
-// activeUUID reports which stored account Claude Code is currently using, matched on access token.
+// activeUUID reports which stored account Claude Code is currently using. The access token is
+// the exact match, but Claude Code refreshes its own tokens, so the vault's copy goes stale within
+// hours; the identity ~/.claude.json records then says which account it is. Without this fallback
+// the active account looked parked and got refreshed from here, which rule 3 forbids.
 func activeUUID(v Vault) string {
 	o, err := ccOAuth()
 	if err != nil {
@@ -313,6 +369,15 @@ func activeUUID(v Vault) string {
 			return uuid
 		}
 	}
+	_, raw := readClaudeJSONIdentity()
+	var id struct {
+		AccountUUID string `json:"accountUuid"`
+	}
+	if json.Unmarshal(raw, &id) == nil {
+		if _, ok := v[id.AccountUUID]; ok {
+			return id.AccountUUID
+		}
+	}
 	return ""
 }
 
@@ -321,6 +386,9 @@ func switchTo(v Vault, uuid string) error {
 	target, ok := v[uuid]
 	if !ok {
 		return fmt.Errorf("no stored account with uuid %s", uuid)
+	}
+	if target.OAuth.AccessToken == "" {
+		return fmt.Errorf("%s has a headless token only; Claude Code's own login needs a full-scope token, so run `claude auth login` and capture it", target.Email)
 	}
 	blob, err := readCCBlob()
 	if err != nil {
@@ -334,10 +402,8 @@ func switchTo(v Vault, uuid string) error {
 	// Claude Code refreshes the outgoing account's tokens behind our back; re-capture them before
 	// they are overwritten, or the vault keeps a refresh token that is already dead.
 	if outgoing, err := oauthFromBlob(blob); err == nil {
-		for id, a := range v {
-			if a.OAuth.AccessToken == outgoing.AccessToken && id != uuid {
-				a.OAuth = outgoing
-			}
+		if id := activeUUID(v); id != "" && id != uuid {
+			v[id].OAuth = outgoing
 		}
 	}
 
@@ -378,6 +444,9 @@ func forget(v Vault, uuid string) error {
 // usageFor fetches usage for one account, refreshing parked tokens as needed. The active account
 // is never refreshed here — Claude Code owns those tokens and rotation could log the user out.
 func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
+	if a.OAuth.AccessToken == "" {
+		return Usage{}, errHeadlessOnly
+	}
 	token := a.OAuth.AccessToken
 	if isActive {
 		if o, err := ccOAuth(); err == nil {

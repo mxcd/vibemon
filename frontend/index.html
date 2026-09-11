@@ -109,6 +109,7 @@
   <footer>
     <button id="capture">Capture</button>
     <button id="refresh">Refresh</button>
+    <button id="settings">Settings</button>
     <button id="quit">Quit</button>
     <span class="stamp" id="stamp"></span>
   </footer>
@@ -119,6 +120,8 @@ const { Events } = await import('/wails/runtime.js');
 let state = { accounts: [] };
 
 const el = id => document.getElementById(id);
+// Child output (limit messages) and API strings end up in these templates; never trust them as markup.
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const send = (name, data) => Events.Emit(name, data ?? null);
 
 function severityClass(g) {
@@ -143,7 +146,7 @@ function gauge(name, g) {
   const pct = Math.max(0, Math.min(100, g.percent));
   return `<div class="gauge ${severityClass(g)}">
     <div class="top">
-      <span class="name">${name}</span>
+      <span class="name">${esc(name)}</span>
       <span class="pct">${g.percent.toFixed(0)}%</span>
     </div>
     <div class="bar"><i style="width:${pct}%"></i></div>
@@ -155,6 +158,7 @@ function gauge(name, g) {
 
 function render() {
   const accounts = state.accounts || [];
+  state.accounts = accounts;
   const active = accounts.find(a => a.active);
 
   // A stale-data warning belongs on screen even when the gauges still have old numbers to show.
@@ -184,22 +188,27 @@ function render() {
     ? `<div class="empty">This account needs a fresh login.<br>Run <b>claude /login</b>, then Capture.</div>`
     : u
       ? gauge('Session · 5h', u.session) + gauge('Weekly · 7d', u.weekly) + (u.scoped ? gauge(u.scoped.label + ' · 7d', u.scoped) : '')
-      : `<div class="empty">${active && active.error ? active.error : 'waiting for usage…'}</div>`;
+      : `<div class="empty">${active && active.error ? esc(active.error) : 'waiting for usage…'}</div>`;
 
   el('accounts').innerHTML = '<h2>Accounts</h2>' + accounts.map(a => {
     const nums = a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '—';
-    const right = a.needsReauth ? `<span class="badge">needs login</span>` : `<span class="nums">${nums}</span>`;
+    const right = a.needsReauth ? `<span class="badge">needs login</span>`
+      : a.benchedUntil ? `<span class="badge" title="${esc(a.benchReason)}">benched ${countdown(a.benchedUntil)}</span>`
+      : `<span class="nums">${nums}</span>`;
+    const turns = a.turns ? ` · ${a.turns} turn${a.turns === 1 ? '' : 's'}/1h` : '';
     const resets = a.usage
       ? `<span data-reset="${a.usage.session.resetsAt || ''}">${countdown(a.usage.session.resetsAt)}</span>`
         + ` · <span data-reset="${a.usage.weekly.resetsAt || ''}">${countdown(a.usage.weekly.resetsAt)}</span>`
       : '';
-    const sub = a.needsReauth ? 'run claude auth login' : (resets ? 'resets ' + resets : '');
+    const sub = a.needsReauth ? 'run claude auth login'
+      : !a.hasLogin ? 'headless token only' + turns
+      : (resets ? 'resets ' + resets : '') + turns;
     const title = [a.plan, a.orgName].filter(Boolean).join(' — ');
-    return `<div class="acct ${a.active ? 'active' : ''}" data-uuid="${a.uuid}" title="${title}">
+    return `<div class="acct ${a.active ? 'active' : ''}" data-uuid="${esc(a.uuid)}" title="${esc(title)}">
       <span class="dot"></span>
-      <span class="who"><span class="mail">${a.preferred ? '★ ' : ''}${a.email}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</span>
+      <span class="who"><span class="mail">${a.preferred ? '★ ' : ''}${esc(a.email)}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</span>
       ${right}
-      <span class="kill" data-kill="${a.uuid}" title="Forget this account">×</span>
+      <span class="kill" data-kill="${esc(a.uuid)}" title="Forget this account">×</span>
     </div>`;
   }).join('');
 
@@ -220,6 +229,7 @@ Events.On('state', e => {
 
 el('capture').onclick = () => send('panel:capture');
 el('refresh').onclick = () => send('panel:refresh');
+el('settings').onclick = () => send('panel:settings');
 el('quit').onclick = () => send('panel:quit');
 
 // Tick the countdowns locally so they stay honest between the 60s polls.

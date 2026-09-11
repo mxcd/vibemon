@@ -66,11 +66,63 @@ vibemon list                    # * marks the active account
 vibemon switch you@example.com
 vibemon usage                   # usage for every stored account
 vibemon remove you@example.com  # forget an account
+vibemon token you@example.com   # print the account's headless token, for scripts
 ```
 
 **Restart Claude Code after a switch.** Running sessions hold their token in memory and keep using
 the old account until they exit; `vibemon switch` tells you how many are running. To carry on the
 same conversation afterwards, `claude -c` continues where you left off.
+
+## Several projects, several accounts: `vibemon exec`
+
+Switching the global login is the wrong tool when you work on three projects at once with three
+accounts. `vibemon exec` runs `claude` under a per-project account instead, without touching Claude
+Code's own login and without a restart:
+
+```sh
+claude setup-token                    # once per account: a one-year, inference-only token
+vibemon add-token you@example.com     # paste it; stored in the keychain vault next to the login
+
+cd ~/github.com/org/repo
+vibemon exec                          # interactive claude, under this project's first available account
+vibemon exec -p "run the tests"       # headless turn, same account choice
+vibemon pick                          # which account would run here, and why the others would not
+```
+
+Which accounts a project may use, and in which order, is set on the **Settings** page (tray menu
+or the panel's Settings button): a default order, plus one ordered list per project path. The
+longest matching path wins, so git worktrees under a project inherit its accounts. Order is
+priority, not a pool: exec takes the first account that is neither benched by a limit nor over the
+usage ceiling (90%, `--ceiling`), and moves down the list only when that one is out.
+
+Headless (`-p`) runs get the runner logic that a 27-hour multi-agent build once had to reinvent in
+bash:
+
+- **Limit hit:** the account is benched until the reset time named in the message, and the same
+  session is resumed under the next account (transcripts are local, so the work so far survives).
+- **Per-model cap** ("You've reached your Fable limit"): same account, next model down
+  (`--fallback fable,opus,sonnet,haiku`).
+- **Missing transcript** ("No conversation found with session ID"): the id never got a transcript,
+  so a fresh session restarts from the original prompt instead of retrying the resume.
+- **Empty output:** a launch hiccup, retried on the same account five times.
+- **Context exhausted** ("Prompt is too long"): terminal, exit 3, so a runner starts over with a
+  compact brief instead of looping.
+- **Locks:** one turn per session id and one per working directory at a time; a second `exec`
+  queues behind the first. A crashed holder's lock evaporates with its process.
+- Exit codes: 0 done, 1 failed, 2 no account has headroom (earliest return printed; `--wait`
+  sleeps until then instead), 3 context exhausted. `--json` wraps the child's result with the
+  account, model, session and every attempt.
+
+Every turn lands in `~/Library/Application Support/vibemon/fleet.json`, so the panel shows how many
+headless turns each account ran in the last hour and which ones a limit has benched. Auto-rotation
+of the interactive login never moves onto an account the fleet has benched.
+
+**What a setup-token cannot do.** Those tokens carry the `user:inference` scope only, so the usage
+and profile endpoints answer 403. vibemon therefore identifies a token by the email you type, and
+gets its usage numbers from the *login* you captured for the same email, polled by the menu bar app.
+Capture the login too and exec skips spent accounts before they fail; without it, an account is
+assumed fresh until a limit says otherwise. Interactive runs under a token lose the features Claude
+Code ties to a full login (`/usage`, Claude in Chrome, Remote Control).
 
 ## Auto-rotation
 

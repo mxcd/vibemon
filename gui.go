@@ -8,8 +8,6 @@ import (
 	"io/fs"
 	"log"
 	"math"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -49,12 +47,21 @@ type panelAccount struct {
 	NeedsReauth bool   `json:"needsReauth"`
 	Usage       *Usage `json:"usage,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// Fleet view: whether exec can use this account, how busy it has been, and whether a limit
+	// benched it. Fed by the ledger exec writes.
+	HasToken     bool       `json:"hasToken"`
+	HasLogin     bool       `json:"hasLogin"`
+	Turns        int        `json:"turns"`
+	BenchedUntil *time.Time `json:"benchedUntil,omitempty"`
+	BenchReason  string     `json:"benchReason,omitempty"`
 }
 
 type panelState struct {
-	Accounts  []panelAccount `json:"accounts"`
-	UpdatedAt time.Time      `json:"updatedAt"`
-	Notice    string         `json:"notice,omitempty"`
+	Accounts  []panelAccount  `json:"accounts"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	Notice    string          `json:"notice,omitempty"`
+	Order     []string        `json:"order"`
+	Projects  []projectPolicy `json:"projects"`
 }
 
 // density controls how much of the usage picture the menu bar itself carries.
@@ -88,6 +95,9 @@ type monitor struct {
 	density        density
 	autoSwitch     bool
 	preferred      string
+	order          []string
+	projects       []projectPolicy
+	settings       *application.WebviewWindow
 	lastAutoSwitch time.Time
 	// Set when rotation moved off the preferred account, so vibemon knows it may come home later.
 	// A manual switch clears it: an explicit choice outranks the preference.
@@ -137,63 +147,10 @@ func (m *monitor) benched(uuid string) (backoffState, bool) {
 	return s, true
 }
 
-// prefsPath is a plain file rather than a keychain item: none of this is secret, and a corrupt or
-// missing prefs file must never be able to take the credential handling down with it.
-func prefsPath() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "vibemon", "prefs.json"), nil
-}
-
-type prefs struct {
-	Density    density `json:"density"`
-	AutoSwitch bool    `json:"autoSwitch"`
-	Preferred  string  `json:"preferred,omitempty"` // account UUID to come home to
-}
-
-func loadPrefs() prefs {
-	p := prefs{Density: densityExtended}
-	path, err := prefsPath()
-	if err != nil {
-		return p
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return p
-	}
-	var stored prefs
-	if json.Unmarshal(raw, &stored) != nil {
-		return p
-	}
-	switch stored.Density {
-	case densityCondensed, densityExtended, densityFull:
-		p.Density = stored.Density
-	}
-	p.AutoSwitch = stored.AutoSwitch
-	p.Preferred = stored.Preferred
-	return p
-}
-
 // prefs snapshots the preferences that live on the monitor. Caller must hold m.mu.
 func (m *monitor) prefs() prefs {
-	return prefs{Density: m.density, AutoSwitch: m.autoSwitch, Preferred: m.preferred}
-}
-
-func savePrefs(p prefs) error {
-	path, err := prefsPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(p)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, 0o644)
+	return prefs{Density: m.density, AutoSwitch: m.autoSwitch, Preferred: m.preferred,
+		Order: m.order, Projects: m.projects}
 }
 
 func runGUI() error {
@@ -203,7 +160,8 @@ func runGUI() error {
 	}
 
 	saved := loadPrefs()
-	m := &monitor{density: saved.Density, autoSwitch: saved.AutoSwitch, preferred: saved.Preferred}
+	m := &monitor{density: saved.Density, autoSwitch: saved.AutoSwitch, preferred: saved.Preferred,
+		order: saved.Order, projects: saved.Projects}
 	m.app = application.New(application.Options{
 		Name:        "vibemon",
 		Description: "Claude Code usage monitor",
@@ -226,6 +184,25 @@ func runGUI() error {
 		BackgroundColour: application.RGBA{Red: 8, Green: 14, Blue: 10, Alpha: 255},
 	})
 
+	// The settings window is a real window: it holds forms, so it must survive losing focus.
+	m.settings = m.app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Name:             "settings",
+		Title:            "vibemon settings",
+		URL:              "/settings.html",
+		Width:            640,
+		Height:           620,
+		MinWidth:         520,
+		MinHeight:        400,
+		Hidden:           true,
+		BackgroundColour: application.RGBA{Red: 8, Green: 14, Blue: 10, Alpha: 255},
+	})
+
+	// Closing the settings window would destroy it and leave a dead handle; hide it instead.
+	m.settings.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		e.Cancel()
+		m.settings.Hide()
+	})
+
 	m.tray = m.app.SystemTray.New()
 	m.tray.SetTemplateIcon(crtIcon())
 	m.tray.AttachWindow(window).WindowOffset(6)
@@ -242,6 +219,9 @@ func runGUI() error {
 		m.confirmRemove(uuid)
 	})
 	m.app.Event.On("panel:quit", func(*application.CustomEvent) { m.app.Quit() })
+	m.app.Event.On("panel:settings", func(*application.CustomEvent) { m.showSettings() })
+	m.app.Event.On("settings:policy", func(e *application.CustomEvent) { go m.setPolicy(e.Data) })
+	m.app.Event.On("settings:token", func(e *application.CustomEvent) { go m.setToken(e.Data) })
 
 	// Start polling only once the tray actually exists — publishing before Run() would push the
 	// first label into a systray that has not been created yet, leaving it stuck until the next tick.
@@ -299,6 +279,8 @@ func (m *monitor) poll(includeParked bool) {
 func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock := lockVault() // a CLI add-token during this tick's HTTP calls must not be clobbered by the save below
+	defer unlock()
 
 	v, err := loadVault()
 	if err != nil {
@@ -323,6 +305,8 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	for _, a := range m.state.Accounts {
 		previous[a.UUID] = a.Usage
 	}
+	fleet := readFleet()
+	polled := map[string]Usage{}
 
 	accounts := make([]panelAccount, 0, len(v))
 	for _, a := range v.sorted() {
@@ -331,8 +315,16 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 			UUID: a.UUID, Email: a.Email, Label: a.Label, OrgName: a.OrgName,
 			Plan: a.planLabel(), Active: isActive, NeedsReauth: a.NeedsReauth,
 			Preferred: a.UUID == m.preferred,
+			HasToken:  a.HeadlessToken != "", HasLogin: a.OAuth.AccessToken != "",
+			Turns: fleet.turnsLastHour(a.UUID),
+		}
+		if b, ok := fleet.benched(a.UUID); ok {
+			until := b.Until
+			pa.BenchedUntil, pa.BenchReason = &until, b.Reason
 		}
 		switch state, waiting := m.benched(a.UUID); {
+		case !pa.HasLogin:
+			pa.Error = "headless token only, no usage"
 		case waiting:
 			// Still serving a backoff: show the last good numbers rather than hammering the API.
 			pa.Usage = previous[a.UUID]
@@ -348,6 +340,7 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 			} else {
 				delete(m.backoff, a.UUID)
 				pa.Usage = &u
+				polled[a.UUID] = u
 			}
 		default:
 			pa.Usage = previous[a.UUID]
@@ -355,8 +348,9 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 		pa.NeedsReauth = a.NeedsReauth
 		accounts = append(accounts, pa)
 	}
+	cacheUsage(polled)
 
-	m.state = panelState{Accounts: accounts, UpdatedAt: time.Now()}
+	m.state = panelState{Accounts: accounts, UpdatedAt: time.Now(), Order: m.order, Projects: m.projects}
 	if err := saveVault(v); err != nil {
 		m.state.Notice = "vault save failed: " + err.Error()
 	}
@@ -395,7 +389,7 @@ func (m *monitor) autoRotate() bool {
 	// before considering anything else.
 	if m.roamed && m.preferred != "" && active.UUID != m.preferred {
 		for _, a := range m.state.Accounts {
-			if a.UUID != m.preferred || a.NeedsReauth || a.Usage == nil {
+			if a.UUID != m.preferred || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
 				continue
 			}
 			if worstOf(a.Usage) < autoSwitchHeadroom {
@@ -417,7 +411,9 @@ func (m *monitor) autoRotate() bool {
 
 	best, bestScore := "", autoSwitchHeadroom
 	for _, a := range m.state.Accounts {
-		if a.Active || a.NeedsReauth || a.Usage == nil {
+		// An account a headless runner just drove into a limit is not a refuge, whatever its
+		// last polled numbers say.
+		if a.Active || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
 			continue
 		}
 		score := worstOf(a.Usage)
@@ -497,24 +493,26 @@ func (m *monitor) switchTo(uuid string) {
 		return
 	}
 	m.mu.Lock()
-	v := m.vault
-	if v == nil {
-		var err error
-		if v, err = loadVault(); err != nil {
-			m.mu.Unlock()
-			m.notify(err.Error())
-			return
-		}
+	unlock := lockVault()
+	v, err := loadVault()
+	if err != nil {
+		unlock()
+		m.mu.Unlock()
+		m.notify(err.Error())
+		return
 	}
+	m.vault = v
 	target, ok := v[uuid]
 	if !ok {
+		unlock()
 		m.mu.Unlock()
 		m.notify("unknown account")
 		return
 	}
 	running := claudeSessionsRunning()
-	err := switchTo(v, uuid)
+	err = switchTo(v, uuid)
 	m.roamed = false // an explicit choice outranks the preferred-account preference
+	unlock()
 	m.mu.Unlock()
 
 	if err != nil {
@@ -558,20 +556,21 @@ func (m *monitor) confirmRemove(uuid string) {
 
 func (m *monitor) remove(uuid string) {
 	m.mu.Lock()
-	v := m.vault
-	if v == nil {
-		var err error
-		if v, err = loadVault(); err != nil {
-			m.mu.Unlock()
-			m.notify(err.Error())
-			return
-		}
+	unlock := lockVault()
+	v, err := loadVault()
+	if err != nil {
+		unlock()
+		m.mu.Unlock()
+		m.notify(err.Error())
+		return
 	}
+	m.vault = v
 	email := ""
 	if a, ok := v[uuid]; ok {
 		email = a.Email
 	}
-	err := forget(v, uuid)
+	err = forget(v, uuid)
+	unlock()
 	m.mu.Unlock()
 
 	if err != nil {
@@ -642,8 +641,9 @@ func (m *monitor) trayLabel() string {
 func (m *monitor) setDensity(d density) {
 	m.mu.Lock()
 	m.density = d
+	p := m.prefs()
 	m.mu.Unlock()
-	if err := savePrefs(prefs{Density: d}); err != nil {
+	if err := savePrefs(p); err != nil {
 		m.notify("could not save preference: " + err.Error())
 		return
 	}
@@ -685,11 +685,87 @@ func (m *monitor) buildMenu() *application.Menu {
 		}
 	}
 	menu.AddSeparator()
+	menu.Add("Settings…").OnClick(func(*application.Context) { m.showSettings() })
 	menu.Add("Capture current account").OnClick(func(*application.Context) { go m.capture() })
 	menu.Add("Refresh now").OnClick(func(*application.Context) { go m.poll(true) })
 	menu.AddSeparator()
 	menu.Add("Quit vibemon").OnClick(func(*application.Context) { m.app.Quit() })
 	return menu
+}
+
+func (m *monitor) showSettings() {
+	m.settings.Show()
+	m.settings.Focus()
+	m.emit()
+}
+
+// setPolicy stores the exec priority order and the per-project account lists from the settings
+// page. Nothing here is secret; it goes to prefs.json, where exec reads it.
+func (m *monitor) setPolicy(data any) {
+	raw, err := json.Marshal(unwrap(data))
+	if err != nil {
+		m.notify("settings: " + err.Error())
+		return
+	}
+	var in struct {
+		Order    []string        `json:"order"`
+		Projects []projectPolicy `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		m.notify("settings: " + err.Error())
+		return
+	}
+	m.mu.Lock()
+	m.order, m.projects = in.Order, in.Projects
+	m.state.Order, m.state.Projects = in.Order, in.Projects
+	p := m.prefs()
+	m.mu.Unlock()
+	if err := savePrefs(p); err != nil {
+		m.notify("could not save settings: " + err.Error())
+		return
+	}
+	m.notify("settings saved")
+}
+
+// setToken attaches a pasted `claude setup-token` token to an account, or creates a token-only one.
+func (m *monitor) setToken(data any) {
+	raw, err := json.Marshal(unwrap(data))
+	if err != nil {
+		m.notify("token: " + err.Error())
+		return
+	}
+	var in struct {
+		Email string `json:"email"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		m.notify("token: " + err.Error())
+		return
+	}
+	m.mu.Lock()
+	unlock := lockVault()
+	v, err := loadVault()
+	var a *Account
+	if err == nil {
+		m.vault = v
+		a, err = addHeadlessToken(v, in.Email, in.Token)
+	}
+	unlock()
+	m.mu.Unlock()
+	if err != nil {
+		m.notify("token: " + err.Error())
+		return
+	}
+	m.notify("stored headless token for " + a.Email)
+	m.poll(true)
+}
+
+// unwrap mirrors firstString for object payloads: JS-side Emit may wrap the value in a slice.
+func unwrap(data any) any {
+	if v, ok := data.([]any); ok && len(v) == 1 {
+		return v[0]
+	}
+	return data
 }
 
 func fatal(err error) {

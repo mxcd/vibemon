@@ -29,6 +29,15 @@ is dead. Treating every 4xx as re-auth once told the user to log in again on a h
 failed fetch benches that account (`monitor.penalise`) instead of retrying on the next tick, and a
 transient error never clears an existing `NeedsReauth` flag.
 
+**5. A `claude setup-token` token is inference-only.**
+`/api/oauth/usage` and `/api/oauth/profile` answer 403 `oauth_scope_insufficient` for it, and
+`apiKeyHelper` rejects it outright (401). It works only as `CLAUDE_CODE_OAUTH_TOKEN` on a child
+process, which is what `exec` does. Never write one into the Claude Code keychain blob (`switchTo`
+refuses), and never expect to poll usage with it: usage comes from the captured login of the same
+email. `exec` never refreshes tokens either; several runners refreshing one parked refresh token
+concurrently would race the rotation, so usage numbers for picking come from the monitor via
+`fleet.json`.
+
 Related: shell out to `/usr/bin/security` rather than calling `SecItem*` via cgo. Claude Code
 created the keychain item through that same binary, so its ACL already trusts it and reads/writes
 never prompt. A native call from our own binary is a different app and may raise a prompt.
@@ -40,14 +49,21 @@ never prompt. A native call from our own binary is a different app and may raise
 | `keychain.go` | `security(1)` wrapper — verified writes |
 | `accounts.go` | vault, Claude Code state, switch/capture/forget, plan labels |
 | `api.go` | `/api/oauth/usage`, `/api/oauth/profile`, token refresh |
-| `gui.go` | systray, panel window, poll loop, prefs |
+| `gui.go` | systray, panel and settings windows, poll loop |
+| `prefs.go` | prefs.json: display, auto-switch, exec order and per-project account policies |
+| `exec.go` | `vibemon exec`: interactive pass-through or the headless limit-and-resume loop |
+| `fleet.go` | `fleet.json` ledger (turns, benches, usage cache), flock-based locks, account ranking |
+| `limits.go` | limit message classifier and reset-time parser |
 | `icon.go` | the CRT tray glyph, drawn in code |
 | `main.go` | CLI subcommands and the GUI entrypoint |
 | `frontend/index.html` | the whole panel: markup, CSS and JS in one file |
+| `frontend/settings.html` | the settings window: tokens, default order, per-project account lists |
 
-State lives in three places: Claude Code's keychain item (its own credentials), `vibemon-accounts`
-(our vault of stored accounts), and `~/Library/Application Support/vibemon/prefs.json` (display
-preference only — never secrets).
+State lives in four places: Claude Code's keychain item (its own credentials), `vibemon-accounts`
+(our vault of stored accounts, including headless tokens), and under
+`~/Library/Application Support/vibemon/` (`VIBEMON_STATE` overrides it): `prefs.json` (display,
+auto-switch, exec policies, never secrets) and `fleet.json` (turns, benches, usage cache, written
+under a flock by every exec and by the monitor).
 
 ## Conventions
 
@@ -57,7 +73,9 @@ preference only — never secrets).
   `five_hour`/`seven_day` windows, because it carries severity and per-model scoping.
 - Anything touching `~/.claude.json` re-reads immediately before writing (live sessions rewrite it
   constantly) and replaces it atomically via a temp file + rename.
-- The panel talks to Go over Wails events only (`panel:*` in, `state` out). No bindings.
+- The panel talks to Go over Wails events only (`panel:*` and `settings:*` in, `state` out). No bindings.
+- `exec` classifies a child's outcome from its output alone (`classify` in `limits.go`); it never
+  carries a verdict from one attempt into the next. A stale signal once benched five healthy accounts.
 
 ## Commands
 
@@ -74,8 +92,10 @@ just autostart  # LaunchAgent for login start
 Tests are assert-based `testing`, no frameworks. The ones that matter guard the destructive paths:
 `TestSwapOAuthPreservesEverythingElse` (MCP tokens survive a switch) and
 `TestPatchClaudeJSONTouchesOnlyIdentity` (the 500KB config keeps its 178 project entries).
-Keep those green.
+Keep those green. `exec_test.go` drives the headless loop against a fake `claude` script; it asserts
+the resume-under-next-account path and that `ANTHROPIC_API_KEY` never reaches a child.
 
-Two things remain unverified in the real world and should be treated as such until confirmed:
-a live account switch followed by `/mcp` reconnecting, and a parked account surviving past its
-~12h token expiry.
+Unverified in the real world, treat as such until confirmed: a live account switch followed by
+`/mcp` reconnecting; a parked account surviving past its ~12h token expiry; `exec` against a real
+limit (the classifier's patterns come from the Paloma One runner logs, the fake script in the tests
+replays them); and interactive `vibemon exec` behaviour of features that need a full-scope login.
