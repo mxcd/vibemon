@@ -126,7 +126,6 @@ func cmdList() error {
 			flag = "  [needs re-auth]"
 		}
 		if a.kind() == kindCodex {
-			marker = " " // there is no active ChatGPT account; codex reads its home per run
 			if !codexLoggedIn(codexHome(a.Email)) {
 				flag += "  [not logged in]"
 			}
@@ -202,50 +201,46 @@ func cmdCodexAdd(args []string) error {
 		return err
 	}
 
-	home := ""
+	// Where the login is prepared: the account's own home when an email was given, a temporary
+	// directory otherwise, because the name only exists once the endpoint has answered.
+	home := filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid()))
 	if email != "" {
 		home = codexHome(email)
-		if _, err := fetchCodexUsage(home); err != nil {
-			if !errors.Is(err, errNeedsReauth) {
-				return err // a throttle or a server fault: try again later, do not log in over it
-			}
-			if err := os.MkdirAll(home, 0o700); err != nil {
-				return err
-			}
-			linkConfig(home)
-			if err := codexLogin(home); err != nil {
-				return err
-			}
+	}
+	if _, err := fetchCodexUsage(home); err != nil {
+		if !errors.Is(err, errNeedsReauth) {
+			return err // a throttle or a server fault: try again later, do not log in over it
 		}
-	} else {
-		tmp := filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid()))
-		if err := os.MkdirAll(tmp, 0o700); err != nil {
+		if err := os.MkdirAll(home, 0o700); err != nil {
 			return err
 		}
-		linkConfig(tmp)
-		if err := codexLogin(tmp); err != nil {
+		linkConfig(home)
+		if err := codexLogin(home); err != nil {
 			return err
 		}
-		r, err := fetchCodexUsage(tmp)
-		if err != nil {
+	}
+
+	// Whoever the browser signed in as has the last word on the name, so a login that went to a
+	// different account than the one asked for still lands in the right home.
+	r, err := fetchCodexUsage(home)
+	if err != nil {
+		return err
+	}
+	if want := codexHome(r.Email); cleanPath(home) != cleanPath(want) {
+		if _, err := os.Stat(want); err == nil {
+			return fmt.Errorf("%s is already set up in %s; the login just made is in %s, delete one of the two",
+				r.Email, want, home)
+		}
+		if err := os.Rename(home, want); err != nil {
 			return err
 		}
-		home = codexHome(r.Email)
-		if _, err := os.Stat(home); err == nil {
-			os.RemoveAll(tmp)
-			return fmt.Errorf("%s is already set up; run `vibemon codex add %s` to track or re-login it", r.Email, r.Email)
-		}
-		if err := os.Rename(tmp, home); err != nil {
-			return err
-		}
+		fmt.Printf("logged in as %s; its home is %s\n", r.Email, want)
+		home = want
 	}
 
 	a, u, err := registerCodex(v, home)
 	if err != nil {
 		return err
-	}
-	if email != "" && !strings.EqualFold(a.Email, email) {
-		return fmt.Errorf("%s is logged in as %s, not %s", home, a.Email, email)
 	}
 	fmt.Printf("added %s (%s)  session %.0f%%  weekly %.0f%% (%s)\n",
 		a.Email, a.planLabel(), u.Session.Percent, u.Weekly.Percent, until(u.Weekly.ResetsAt))
