@@ -496,6 +496,9 @@ func forget(v Vault, uuid string) error {
 // usageFor fetches usage for one account, refreshing parked tokens as needed. The active account
 // is never refreshed here — Claude Code owns those tokens and rotation could log the user out.
 func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
+	if a.kind() == kindCodex {
+		return codexUsageFor(a)
+	}
 	if a.OAuth.AccessToken == "" {
 		return Usage{}, errHeadlessOnly
 	}

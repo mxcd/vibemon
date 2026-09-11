@@ -61,9 +61,12 @@ type Gauge struct {
 
 // Usage is the normalised, UI-facing view of one account's limits.
 type Usage struct {
-	Session   Gauge     `json:"session"`
-	Weekly    Gauge     `json:"weekly"`
-	Scoped    *Gauge    `json:"scoped,omitempty"`
+	Session Gauge  `json:"session"`
+	Weekly  Gauge  `json:"weekly"`
+	Scoped  *Gauge `json:"scoped,omitempty"`
+	// Extra carries per-model limits that never gate picking: shown, not acted on. Codex reports
+	// them beside the account's own windows.
+	Extra     []Gauge   `json:"extra,omitempty"`
 	FetchedAt time.Time `json:"fetchedAt"`
 }
 
@@ -129,6 +132,14 @@ func authGet(url, token string, into any) error {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("anthropic-beta", oauthBeta)
 	req.Header.Set("Accept", "application/json")
+	return doJSON(req, into)
+}
+
+// doJSON sends req and decodes a 200 body into into. The status classification is the one rule 4
+// in CLAUDE.md is about: 401 and 403 mean the grant is dead, 429 means ask again later, and
+// anything else is a plain error that says nothing about the account.
+func doJSON(req *http.Request, into any) error {
+	url := req.URL.String()
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
