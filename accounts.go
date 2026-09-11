@@ -78,6 +78,9 @@ func (a *Account) kind() string {
 // is one, otherwise the rate limit multiplier that actually governs the numbers on screen.
 func (a *Account) planLabel() string {
 	if a.kind() == kindCodex {
+		if a.Plan == "" {
+			return "ChatGPT"
+		}
 		return "ChatGPT · " + a.Plan // the raw plan_type: pro, prolite, plus, team
 	}
 	if seat := strings.ToLower(a.SeatTier); seat != "" {
@@ -303,11 +306,10 @@ func claudeSessionsRunning() int {
 var errHeadlessOnly = errors.New("headless token only, no usage: capture a login for this email")
 
 // findByEmail resolves the user-facing identifier used by every command that takes one. kind ""
-// matches any kind but only when the email is unambiguous; the vault key itself always resolves.
+// matches any kind but only when the email is unambiguous. The address is matched first and the
+// vault key only as a fallback: a token-only Claude account is keyed by its own email, and letting
+// that key win would quietly resolve one of two same-email accounts instead of asking which.
 func findByEmail(v Vault, kind, email string) (*Account, error) {
-	if a, ok := v[email]; ok && (kind == "" || a.kind() == kind) {
-		return a, nil
-	}
 	var found *Account
 	for _, a := range v {
 		if !strings.EqualFold(a.Email, email) || (kind != "" && a.kind() != kind) {
@@ -318,10 +320,13 @@ func findByEmail(v Vault, kind, email string) (*Account, error) {
 		}
 		found = a
 	}
-	if found == nil {
-		return nil, fmt.Errorf("no stored account matching %q — run `vibemon list`", email)
+	if found != nil {
+		return found, nil
 	}
-	return found, nil
+	if a, ok := v[email]; ok && (kind == "" || a.kind() == kind) {
+		return a, nil
+	}
+	return nil, fmt.Errorf("no stored account matching %q — run `vibemon list`", email)
 }
 
 // addHeadlessToken stores a setup-token on the account matching email, creating a token-only entry

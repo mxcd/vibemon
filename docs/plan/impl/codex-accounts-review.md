@@ -31,46 +31,78 @@ the email, rename only the temporary `.login-<pid>` home) and one test. Nothing 
 
 ## Findings
 
+Resolution filled in by the implementer on 11.09.2026, commit `fix(codex): ...` below; every
+finding is addressed in code or docs.
+
 - **MAJOR** `main.go:208` - the typed email is a path segment without validation; `../../.codex`
   resolves to `~/.codex` and the rename at line 234 can move MaPa's interactive login, which
   CLAUDE.md forbids. Fix: reject an email without `@` or containing `/`, `..` or a path separator
   before it reaches `codexHome`, in both `cmdCodexAdd` and `registerCodex` (the endpoint's email
   is also a path segment).
+  **Resolution: fixed.** `codexEmailOK` (`codex.go`) rejects an address without `@` and one holding
+  `/`, `\`, `..`, leading or trailing space, or anything `filepath.Base` shortens. It runs on the
+  typed argument in `cmdCodexAdd`, on the reported address in `registerCodex`, and inside
+  `placeCodexHome`. `TestCodexEmailOK` covers both lists and asserts the concrete
+  `../../.codex` traversal is what the guard stands in front of.
 - **MAJOR** `main.go:234` - a home the user named (`codex add <email>`) is renamed when the login
   turns out to be a different account, so the wrong account silently takes over a home and its
   sessions. The plan said to error on mismatch. Fix: rename only when `home` is the temporary
   `.login-<pid>` directory; otherwise return the plan's "logged in as %s, not %s" error and leave
   both homes as they are. Add a test for the mismatch path.
+  **Resolution: fixed.** The placement decision moved into `placeCodexHome(home, temporary,
+  reported, asked)` in `codex.go`: a home the user named is never renamed, the mismatch returns
+  `"%s is logged in as %s, not %s; nothing was moved"`, and only a `.login-<pid>` home moves, never
+  over an existing one. `TestPlaceCodexHome` covers match, mismatch (and that the named home is
+  still on disk afterwards), move, collision and a traversing address.
 - **MINOR** `accounts.go:308` - the exact-key shortcut runs before the ambiguity scan, so with a
   Claude token stub keyed by its lowercased email and a Codex account for the same email, `remove
   a@x.io` resolves the Claude entry silently instead of erroring. Fix: run the email scan first
   and use the exact key only as a fallback, plus one case in `TestFindByEmailAcrossKinds`.
   (Codex rated this MAJOR; it needs a token-only Claude stub and the effect is a reversible
   forget, so MINOR.)
+  **Resolution: fixed.** `findByEmail` scans addresses first and falls back to the exact vault key
+  only when no address matched, so the stub case now errors and `codex:a@x.io` still resolves.
+  `TestFindByEmailAcrossKinds` gained the stub vault.
 - **MINOR** `main.go:197` - the vault flock is held across the interactive `codex login`. The
   monitor's `pollOnce` takes `m.mu` and then `lockVault()`, so the panel freezes for the whole
   browser round trip. Fix: probe and log in before `lockVault()`, take the lock only around
   `loadVault` and `registerCodex`.
+  **Resolution: fixed.** `cmdCodexAdd` probes, logs in and places the home with no lock held;
+  `lockVault()` is taken immediately before `loadVault` and covers only that and `registerCodex`.
 - **MINOR** `codex.go:284` - `appendCodexOrder` runs on every registration, so re-running `codex
   add <email>` after a re-auth puts an account the user unticked in Settings back into
   `codexOrder`. Fix: append only when `v[key]` was nil.
+  **Resolution: fixed.** `registerCodex` remembers whether the key was already in the vault and
+  appends to the order only on a first registration.
 - **MINOR** `main.go:218` - a failed or aborted `codex login` leaves `.login-<pid>` behind, and
   the name-collision branch leaves a second logged-in `auth.json` in it. Fix: `os.RemoveAll` the
   temporary home on every error path, as the plan specified.
+  **Resolution: fixed.** One `defer` removes the temporary home on every path that does not file
+  it, including the collision, and says so on stderr when it is discarding a login that did work,
+  so the user knows to run the command again rather than hunt for the directory.
 - **MINOR** `codex.go:195` - the access token is a 5-day JWT that only codex refreshes. An account
   idle for five days answers 401 on the poll, is flagged `NeedsReauth`, and `codex add <email>`
   then runs a browser login even though a plain `codex exec` would have refreshed it. No code
   change required now, but add it to the CLAUDE.md unverified list so the first "needs login" on
   a parked account is read correctly.
+  **Resolution: documented.** Added to the unverified list in CLAUDE.md, naming the 5-day JWT, the
+  401 it may produce on a parked account, and that a plain `codex exec` in that home refreshes it.
 - **DESIGN** `frontend/index.html:202` - a Codex row's sub line reads `resets · 4d 7h` because the
   session gauge has no reset and the two countdowns are joined unconditionally; the stray dot
   reads as a broken field. Fix: collect the countdowns that have a `resetsAt` and join those.
+  **Resolution: fixed.** The row builds one list of the windows the account actually has and joins
+  only the countdowns among them, so a Codex row reads `resets 4d 7h`.
 - **DESIGN** `frontend/index.html:211` - Codex rows keep the hollow active dot and the same
   `0% · 100%` numbers as Claude rows although neither "active" nor a session window exists for
   them, so a spent Codex account looks half healthy. Fix: `visibility: hidden` on the dot for
   `.acct.codex`, and render a dash for a gauge with `percent === 0` and no `resetsAt`.
+  **Resolution: fixed**, with one change to the suggestion: the dot is `visibility: hidden` for
+  `.acct.codex` as asked, but a window the account does not have is left out of the numbers rather
+  than drawn as a dash, so a spent Codex row reads `100%` instead of `- · 100%`. A row whose
+  windows are all genuinely at zero still reads `0%`.
 - **DESIGN** `accounts.go:81` - `planLabel` yields `ChatGPT · ` with a trailing separator when
   `Plan` is empty (visible in the settings table). Fix: return `ChatGPT` alone when `Plan == ""`.
+  **Resolution: fixed.** `planLabel` returns `ChatGPT` when the plan is unknown.
 
 ## Verified fine
 

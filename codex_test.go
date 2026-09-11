@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +168,70 @@ func TestFetchCodexUsageClassifiesStatus(t *testing.T) {
 	status = http.StatusInternalServerError
 	if _, err := fetchCodexUsage(home); err == nil || errors.Is(err, errNeedsReauth) {
 		t.Errorf("a server fault says nothing about the login, got %v", err)
+	}
+}
+
+// The typed email and the one the endpoint reports both become a path segment; "../../.codex"
+// would join to the user's own interactive home, which vibemon must never touch.
+func TestCodexEmailOK(t *testing.T) {
+	for _, ok := range []string{"a@x.io", "Max.Partenfelder@aso.nexus", "a+b@x.io"} {
+		if err := codexEmailOK(ok); err != nil {
+			t.Errorf("%q must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "nobody", "../../.codex", "../a@x.io", "a/b@x.io", `a\b@x.io`,
+		"..@x.io", " a@x.io", "a@x.io "} {
+		if err := codexEmailOK(bad); err == nil {
+			t.Errorf("%q must be refused", bad)
+		}
+	}
+	// The concrete escape the guard exists for.
+	t.Setenv("VIBEMON_CODEX_HOMES", "/Users/someone/.vibemon/codex")
+	if got := codexHome("../../.codex"); got != "/Users/someone/.codex" {
+		t.Fatalf("the traversal this guards is gone, re-check codexHome: %s", got)
+	}
+}
+
+func TestPlaceCodexHome(t *testing.T) {
+	homes := t.TempDir()
+	t.Setenv("VIBEMON_CODEX_HOMES", homes)
+	taken := filepath.Join(homes, "taken@x.io")
+	if err := os.MkdirAll(taken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	named := filepath.Join(homes, "asked@x.io")
+	if err := os.MkdirAll(named, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(homes, ".login-1")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The account is who it said it was: stay put.
+	if got, err := placeCodexHome(named, false, "asked@x.io", "asked@x.io"); err != nil || got != named {
+		t.Errorf("a matching home must be kept: %q %v", got, err)
+	}
+	// The browser signed in as somebody else: the named home is not handed over.
+	got, err := placeCodexHome(named, false, "other@x.io", "asked@x.io")
+	if err == nil || got != "" {
+		t.Errorf("a home the user named must never be renamed: %q %v", got, err)
+	}
+	if !strings.Contains(err.Error(), "other@x.io") || !strings.Contains(err.Error(), "asked@x.io") {
+		t.Errorf("the error must name both accounts: %v", err)
+	}
+	if _, statErr := os.Stat(named); statErr != nil {
+		t.Error("the named home must still be there")
+	}
+	// A temporary login home is moved into place, but never over an existing home.
+	if got, err := placeCodexHome(tmp, true, "fresh@x.io", ""); err != nil || got != filepath.Join(homes, "fresh@x.io") {
+		t.Errorf("a temporary home must move into place: %q %v", got, err)
+	}
+	if got, err := placeCodexHome(tmp, true, "taken@x.io", ""); err == nil || got != "" {
+		t.Errorf("an existing home must not be overwritten: %q %v", got, err)
+	}
+	// An address that is not one cannot become a directory name.
+	if _, err := placeCodexHome(tmp, true, "../../.codex", ""); err == nil {
+		t.Error("a traversing address must be refused")
 	}
 }

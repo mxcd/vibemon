@@ -231,6 +231,19 @@ func TestFindByEmailAcrossKinds(t *testing.T) {
 	if a, err := findByEmail(v, "", "codex:a@x.io"); err != nil || a.Kind != kindCodex {
 		t.Errorf("the vault key itself must always resolve, got %+v %v", a, err)
 	}
+
+	// A token-only Claude account is keyed by its own email. That key must not win over the
+	// ambiguity: `remove a@x.io` would silently forget one of the two.
+	stub := Vault{
+		"a@x.io":       {UUID: "a@x.io", Email: "a@x.io", HeadlessToken: "sk-ant-oat01-a"},
+		"codex:a@x.io": {UUID: "codex:a@x.io", Email: "a@x.io", Kind: kindCodex},
+	}
+	if a, err := findByEmail(stub, "", "a@x.io"); err == nil {
+		t.Errorf("the email is ambiguous and must be an error, got %+v", a)
+	}
+	if a, err := findByEmail(stub, kindClaude, "a@x.io"); err != nil || a.UUID != "a@x.io" {
+		t.Errorf("--kind claude must still resolve the stub, got %+v %v", a, err)
+	}
 }
 
 // The vault is shared with accounts stored before Codex existed; their JSON must not change.

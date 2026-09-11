@@ -75,6 +75,8 @@
   .acct .badge { color: var(--warning); font-size: 10px; flex: none; align-self: flex-start; }
   .acct.active, .acct.codex { cursor: default; }
   .acct.codex:hover { border-color: transparent; background: none; }
+  /* Hidden rather than removed: a ChatGPT account is never "active", but the rows stay aligned. */
+  .acct.codex .dot { visibility: hidden; }
   .accounts h2:not(:first-child) { margin-top: 10px; }
   .acct .kill {
     flex: none; align-self: flex-start; width: 14px; text-align: center; line-height: 1;
@@ -194,15 +196,18 @@ function render() {
 
   const row = a => {
     const codex = a.kind === 'codex';
-    const nums = a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '—';
+    // A window the account does not have (ChatGPT plans report no session one) is left out
+    // instead of shown as a healthy 0%.
+    const live = a.usage ? [a.usage.session, a.usage.weekly].filter(g => g && (g.percent > 0 || g.resetsAt)) : [];
+    const nums = !a.usage ? '—'
+      : live.length ? live.map(g => `${g.percent.toFixed(0)}%`).join(' · ')
+      : '0%';
     const right = a.needsReauth ? `<span class="badge">needs login</span>`
       : a.benchedUntil ? `<span class="badge" title="${esc(a.benchReason)}">benched ${countdown(a.benchedUntil)}</span>`
       : `<span class="nums">${nums}</span>`;
     const turns = a.turns ? ` · ${a.turns} turn${a.turns === 1 ? '' : 's'}/1h` : '';
-    const resets = a.usage
-      ? `<span data-reset="${a.usage.session.resetsAt || ''}">${countdown(a.usage.session.resetsAt)}</span>`
-        + ` · <span data-reset="${a.usage.weekly.resetsAt || ''}">${countdown(a.usage.weekly.resetsAt)}</span>`
-      : '';
+    const resets = live.filter(g => g.resetsAt)
+      .map(g => `<span data-reset="${g.resetsAt}">${countdown(g.resetsAt)}</span>`).join(' · ');
     const sub = a.needsReauth ? (codex ? 'run vibemon codex add' : 'run claude auth login')
       : !a.hasLogin ? (codex ? 'not logged in' : 'headless token only') + turns
       : (resets ? 'resets ' + resets : '') + turns;

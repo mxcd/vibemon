@@ -194,19 +194,30 @@ func cmdCodexAdd(args []string) error {
 		}
 		email = a
 	}
-	unlock := lockVault()
-	defer unlock()
-	v, err := loadVault()
-	if err != nil {
-		return err
-	}
-
-	// Where the login is prepared: the account's own home when an email was given, a temporary
-	// directory otherwise, because the name only exists once the endpoint has answered.
-	home := filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid()))
 	if email != "" {
-		home = codexHome(email)
+		if err := codexEmailOK(email); err != nil {
+			return err
+		}
 	}
+	// Where the login is prepared: the account's own home when an email was given, a temporary
+	// directory otherwise, because the name only exists once the endpoint has answered. Nothing
+	// here holds the vault lock: `codex login` waits for a browser, and the menu bar app takes that
+	// same lock on every tick.
+	home, temporary := codexHome(email), false
+	if email == "" {
+		home, temporary = filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid())), true
+	}
+	// A login that never got filed is removed rather than left as an orphan no command can find.
+	defer func() {
+		if !temporary {
+			return
+		}
+		if codexLoggedIn(home) {
+			fmt.Fprintf(os.Stderr, "vibemon: the login in %s was never filed and has been discarded; run `vibemon codex add` again\n", home)
+		}
+		os.RemoveAll(home)
+	}()
+
 	if _, err := fetchCodexUsage(home); err != nil {
 		if !errors.Is(err, errNeedsReauth) {
 			return err // a throttle or a server fault: try again later, do not log in over it
@@ -220,24 +231,28 @@ func cmdCodexAdd(args []string) error {
 		}
 	}
 
-	// Whoever the browser signed in as has the last word on the name, so a login that went to a
-	// different account than the one asked for still lands in the right home.
 	r, err := fetchCodexUsage(home)
 	if err != nil {
 		return err
 	}
-	if want := codexHome(r.Email); cleanPath(home) != cleanPath(want) {
-		if _, err := os.Stat(want); err == nil {
-			return fmt.Errorf("%s is already set up in %s; the login just made is in %s, delete one of the two",
-				r.Email, want, home)
-		}
-		if err := os.Rename(home, want); err != nil {
+	dest, err := placeCodexHome(home, temporary, r.Email, email)
+	if err != nil {
+		return err
+	}
+	if dest != home {
+		if err := os.Rename(home, dest); err != nil {
 			return err
 		}
-		fmt.Printf("logged in as %s; its home is %s\n", r.Email, want)
-		home = want
+		fmt.Printf("logged in as %s; its home is %s\n", r.Email, dest)
+		home, temporary = dest, false
 	}
 
+	unlock := lockVault()
+	defer unlock()
+	v, err := loadVault()
+	if err != nil {
+		return err
+	}
 	a, u, err := registerCodex(v, home)
 	if err != nil {
 		return err

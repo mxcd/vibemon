@@ -33,6 +33,41 @@ func codexHome(email string) string {
 	return filepath.Join(codexHomesDir(), strings.ToLower(email))
 }
 
+// codexEmailOK guards the one place an email becomes a path segment. "../../.codex" would otherwise
+// join to the user's own interactive home, which vibemon must never touch, so both the typed
+// argument and the address the endpoint reports are checked before they reach codexHome.
+func codexEmailOK(email string) error {
+	if !strings.Contains(email, "@") {
+		return fmt.Errorf("%q is not an email address", email)
+	}
+	if strings.ContainsAny(email, `/\`) || strings.Contains(email, "..") ||
+		email != filepath.Base(email) || strings.TrimSpace(email) != email {
+		return fmt.Errorf("%q is not a usable account name", email)
+	}
+	return nil
+}
+
+// placeCodexHome decides where a login belongs once the endpoint has named it. A home the user
+// named keeps whatever is in it: a browser that signed into another account must not make that
+// account take over the home, and its sessions, of the one that was asked for. Only a temporary
+// login home is moved into place, and never over an existing one.
+func placeCodexHome(home string, temporary bool, reported, asked string) (string, error) {
+	if err := codexEmailOK(reported); err != nil {
+		return "", fmt.Errorf("the endpoint reported %w", err)
+	}
+	want := codexHome(reported)
+	if cleanPath(home) == cleanPath(want) {
+		return home, nil
+	}
+	if !temporary {
+		return "", fmt.Errorf("%s is logged in as %s, not %s; nothing was moved", home, reported, asked)
+	}
+	if _, err := os.Stat(want); err == nil {
+		return "", fmt.Errorf("%s is already set up in %s; run `vibemon codex add %s` to log it in again", reported, want, reported)
+	}
+	return want, nil
+}
+
 // codexKey is the vault key of a Codex account. The prefix also tells the kind of a key whose
 // account has already left the vault, which is what keeps account policies failing closed.
 func codexKey(email string) string { return "codex:" + strings.ToLower(email) }
@@ -265,15 +300,15 @@ func registerCodex(v Vault, home string) (*Account, Usage, error) {
 		}
 		return nil, Usage{}, err
 	}
-	if !strings.Contains(r.Email, "@") {
-		return nil, Usage{}, fmt.Errorf("%s reported no email; cannot file it", home)
+	if err := codexEmailOK(r.Email); err != nil {
+		return nil, Usage{}, fmt.Errorf("%s: the endpoint reported %w", home, err)
 	}
 	if want := codexHome(r.Email); cleanPath(home) != cleanPath(want) {
 		return nil, Usage{}, fmt.Errorf("%s is logged in as %s, whose home belongs at %s", home, r.Email, want)
 	}
 	key := codexKey(r.Email)
-	a := v[key]
-	if a == nil {
+	a, known := v[key]
+	if !known {
 		a = &Account{UUID: key, CapturedAt: time.Now()}
 		v[key] = a
 	}
@@ -281,7 +316,11 @@ func registerCodex(v Vault, home string) (*Account, Usage, error) {
 	if err := saveVault(v); err != nil {
 		return nil, Usage{}, err
 	}
-	appendCodexOrder(key)
+	if !known {
+		// Only a first registration touches the order: re-running `codex add` after a re-auth must
+		// not put an account back that the user unticked in Settings.
+		appendCodexOrder(key)
+	}
 	return a, r.normalize(time.Now()), nil
 }
 

@@ -118,7 +118,10 @@ Unverified in the real world, treat as such until confirmed: a real `vibemon cod
 MaPa's homes were adopted from a manual `codex login`, and the browser flow inside `codexLogin` has
 never run); a real limit under `exec --kind codex` (the classifier's Codex patterns come from one
 recorded runner line); the time zone of codex's `try again at <clock time>`, which is read as local;
-a live account switch followed by
+what a Codex account idle for more than five days does on the next poll (the access token is a
+5-day JWT that only codex refreshes, so the poll may answer 401 and raise `NeedsReauth` although a
+plain `codex exec` in that home would have refreshed it, and `codex add <email>` would then run a
+browser login that was not needed); a live account switch followed by
 `/mcp` reconnecting; a parked account surviving past its ~12h token expiry; `exec` against a real
 limit (the classifier's patterns come from the Paloma One runner logs, the fake script in the tests
 replays them); and interactive `vibemon exec` behaviour of features that need a full-scope login.
