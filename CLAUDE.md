@@ -42,13 +42,32 @@ Related: shell out to `/usr/bin/security` rather than calling `SecItem*` via cgo
 created the keychain item through that same binary, so its ACL already trusts it and reads/writes
 never prompt. A native call from our own binary is a different app and may raise a prompt.
 
+## Codex accounts
+
+ChatGPT logins are a second account kind and share none of the Claude machinery.
+
+- **One `CODEX_HOME` per login**, at `~/.vibemon/codex/<email>` (`VIBEMON_CODEX_HOMES` overrides the
+  parent). The directory is the whole identity; `vibemon codex add <email>` adopts one that is
+  already logged in and only runs `codex login` when there is none.
+- **vibemon reads `auth.json` and never writes it.** codex owns those tokens and refreshes them in
+  its own home; a second refresher would race the rotation. The email and plan always come from the
+  usage endpoint, never from what the user typed.
+- **`~/.codex` is MaPa's interactive login and is never moved, symlinked or registered.** Only
+  `config.toml` is shared into a newly created home, by symlink.
+- Rule 4 applies unchanged: a 401 or 403 from `wham/usage` is re-auth, a 429 is back off.
+- `remove` forgets the vault entry and keeps the home; deleting the directory is what logs the
+  account out, and the message says so.
+- The Codex path never touches `keychain.go`'s Claude Code item, so rules 1 to 3 hold by
+  construction. The vault (`vibemon-accounts`) does hold the Codex rows, which carry no secret.
+
 ## Layout
 
 | File | Holds |
 |---|---|
 | `keychain.go` | `security(1)` wrapper — verified writes |
-| `accounts.go` | vault, Claude Code state, switch/capture/forget, plan labels |
+| `accounts.go` | vault, account kinds, Claude Code state, switch/capture/forget, plan labels |
 | `api.go` | `/api/oauth/usage`, `/api/oauth/profile`, token refresh |
+| `codex.go` | Codex homes, wham usage, the `codex login` wrapper, child env |
 | `gui.go` | systray, panel and settings windows, poll loop |
 | `prefs.go` | prefs.json: display, auto-switch, exec order and per-project account policies |
 | `exec.go` | `vibemon exec`: interactive pass-through or the headless limit-and-resume loop |
@@ -95,7 +114,11 @@ Tests are assert-based `testing`, no frameworks. The ones that matter guard the 
 Keep those green. `exec_test.go` drives the headless loop against a fake `claude` script; it asserts
 the resume-under-next-account path and that `ANTHROPIC_API_KEY` never reaches a child.
 
-Unverified in the real world, treat as such until confirmed: a live account switch followed by
+Unverified in the real world, treat as such until confirmed: a real `vibemon codex add` (both of
+MaPa's homes were adopted from a manual `codex login`, and the browser flow inside `codexLogin` has
+never run); a real limit under `exec --kind codex` (the classifier's Codex patterns come from one
+recorded runner line); the time zone of codex's `try again at <clock time>`, which is read as local;
+a live account switch followed by
 `/mcp` reconnecting; a parked account surviving past its ~12h token expiry; `exec` against a real
 limit (the classifier's patterns come from the Paloma One runner logs, the fake script in the tests
 replays them); and interactive `vibemon exec` behaviour of features that need a full-scope login.

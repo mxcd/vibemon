@@ -124,6 +124,45 @@ Capture the login too and exec skips spent accounts before they fail; without it
 assumed fresh until a limit says otherwise. Interactive runs under a token lose the features Claude
 Code ties to a full login (`/usage`, Claude in Chrome, Remote Control).
 
+## Codex (ChatGPT) accounts
+
+The same rotation for `codex`. A ChatGPT login lives in its own `CODEX_HOME`, so several accounts
+coexist without ever logging each other out, and vibemon picks between them exactly as it picks
+Claude accounts.
+
+```sh
+vibemon codex add you@example.com     # adopts ~/.vibemon/codex/you@example.com when it is already
+                                      # logged in, else runs `codex login` there (browser)
+vibemon codex add                     # log a new account in and name its home after the reported email
+vibemon list                          # Claude rows, then the Codex ones (ChatGPT · pro)
+vibemon usage                         # both kinds; Codex rows append their per-model limits
+vibemon pick --kind codex             # which ChatGPT account a review would run under
+vibemon exec --kind codex -- codex exec --skip-git-repo-check -o review.md "review this diff"
+vibemon remove --kind codex you@example.com   # forget it; the login in the home stays
+```
+
+Usage comes from `GET https://chatgpt.com/backend-api/wham/usage`, read with the access token in
+that home's `auth.json`. vibemon never refreshes those tokens: codex does it itself inside the same
+home. Windows are mapped by their length, not by the slot they arrive in, so a plan that reports
+only a weekly window lands in the weekly gauge. Per-model limits are shown, never acted on.
+
+A Codex review is a single turn, so a limit reruns the whole command under the next account with
+headroom rather than resuming anything; `--model` and `--session` are refused with `--kind codex`
+(codex takes `-m` in its own argv). The child gets `CODEX_HOME` and loses any inherited
+`CODEX_HOME` and `OPENAI_API_KEY`, which would bill the API instead of the plan.
+
+Order is set per kind on the **Settings** page, next to the Claude one; `vibemon codex add` appends
+a new account to the end of the Codex list, so the order you add them in is the order they fill up
+in. `~/.codex` stays your own interactive login: vibemon never moves, links or registers it.
+
+`vibemon pick --json` carries a `kind` on every row (`claude` or `codex`), so a driver can group
+them:
+
+```json
+{"runnable": [{"kind": "codex", "email": "you@example.com", "usage": {"session": {}, "weekly": {}, "extra": []}}],
+ "skipped":  [{"kind": "codex", "email": "old@example.com", "reason": "Weekly at 100%", "until": "2026-09-15T19:59:30+02:00"}]}
+```
+
 ## Auto-rotation
 
 Off by default — enable *Auto-switch when exhausted* in the tray menu. When the active account
@@ -160,7 +199,8 @@ parked ones every 20 — the countdowns tick locally in between. A failed fetch 
 with exponential backoff (2 minutes doubling to 30, or whatever `Retry-After` asks for) and the last
 known numbers stay on screen. A 429 is never mistaken for a dead account.
 
-Nothing leaves your machine except the two Anthropic API calls above. Preferences live in
+Nothing leaves your machine except the two Anthropic API calls above, and the ChatGPT usage call
+for each Codex account. Preferences live in
 `~/Library/Application Support/vibemon/prefs.json` and contain no secrets.
 
 ## Development
@@ -180,8 +220,8 @@ mine ends up in the repo.
 ## Caveats
 
 - macOS only. Credential storage differs on Windows and Linux.
-- Built against Claude Code 2.1.219. The usage endpoint and keychain layout are not public API and
-  could change under you.
+- Built against Claude Code 2.1.219 and codex-cli 0.153.4. Neither usage endpoint is public API,
+  and the keychain layout is not either; both could change under you.
 - Wails v3 is still alpha.
 
 ## License

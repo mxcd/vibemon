@@ -79,8 +79,11 @@ first. Additions verified while planning:
    has left the vault, which keeps the fail-closed rule for policies intact (decision 8).
 3. **The home directory is derived, not stored:** `codexHome(email)` is
    `~/.vibemon/codex/<lowercased email>`; `VIBEMON_CODEX_HOMES` overrides the parent for tests,
-   mirroring `VIBEMON_STATE`. The existing `~/.codex` login is registered by a symlink at that
-   path (`vibemon codex add --home ~/.codex` creates it); nothing is moved.
+   mirroring `VIBEMON_STATE`.
+   **Deviation (implementation, MaPa 11.09.2026):** there is no `--home` mode and no symlinking of a
+   foreign home. `~/.codex` stays MaPa's interactive login and is never moved, linked or registered;
+   both real accounts already sit at their canonical path. `registerCodex` refuses a home that is
+   not at `codexHome(<the email the endpoint reports>)` and says where it belongs.
 4. **Usage gauges map by window length.** A window with `limit_window_seconds >= 7 days` is
    `Weekly`, anything shorter is `Session`. The task text says primary is weekly and secondary is
    session; that holds for the prolite account only because it has no session window (fact 1). A
@@ -98,20 +101,27 @@ first. Additions verified while planning:
 7. **`pick` defaults to `--kind all`, `exec` defaults to `--kind claude`.** The bridge reads one
    `pick --json` and groups by `kind`; an `exec` needs one kind. `all` runs `rank` once per kind
    and concatenates, Claude first.
-8. **Account order is partitioned by kind.** `accountOrder(v, dir, kind)` keeps the configured
-   entries (project list, else global order) whose key is of the requested kind. If the list names
+8. **Account order is partitioned by kind.** **Deviation (MaPa 11.09.2026):** the two kinds keep
+   *separate global lists* in prefs, `order` (Claude) and `codexOrder` (ChatGPT); the settings window
+   edits both. A project policy keeps one list holding both kinds, partitioned as below, and falls
+   back to the global list of the requested kind when it names none of that kind (the plan said
+   "every account alphabetically"; going through the configured order first is strictly closer to
+   what the user asked for and ends at the same place when no order is set). `vibemon codex add`
+   appends a newly registered account to the end of `codexOrder`, so the order accounts are added in
+   is the order exec fills them up in and picking works without a trip to the settings window.
+   `accountOrder(v, dir, kind)` keeps the configured entries (project list, else global order of that
+   kind) whose key is of the requested kind. If the list names
    at least one key of that kind, only those run (gone keys drop out, fail closed as today). If it
    names none of that kind, every stored account of that kind runs in email order: a policy written
    before Codex existed must not silently exclude every Codex account. Per-project Codex lists thus
    work through the existing settings window for free.
-9. **`vibemon codex add` has three modes in one command.** Bare `vibemon codex add` logs a new
-   account in (temporary home, renamed to the email the endpoint reports). `vibemon codex add
-   <email>` ensures that account: if `~/.vibemon/codex/<email>/auth.json` exists and the endpoint
-   answers 200, it registers without a browser round trip (MaPa's manual WIT login); otherwise it
-   runs `codex login` in that home, then verifies the reported email matches. `vibemon codex add
-   --home <dir>` registers an existing foreign home (`~/.codex`) by symlink. On a name collision in
-   the bare mode the temporary home is deleted and the command says to use `codex add <email>`;
-   nothing existing is overwritten.
+9. **`vibemon codex add` has two modes in one command** (**deviation:** the `--home` mode is gone,
+   see decision 3). Bare `vibemon codex add` logs a new account in (temporary home, renamed to the
+   email the endpoint reports). `vibemon codex add <email>` ensures that account: if
+   `~/.vibemon/codex/<email>/auth.json` exists and the endpoint answers 200, it registers without a
+   browser round trip (both of MaPa's homes); otherwise it runs `codex login` in that home, then
+   verifies the reported email matches. On a name collision in the bare mode the temporary home is
+   deleted and the command says to use `codex add <email>`; nothing existing is overwritten.
 10. **`vibemon remove <email>` forgets the vault entry only; the home stays.** Deleting the home
     would log the account out, and Claude's `remove` does not log out either. The message names
     the directory to delete by hand. When both a Claude and a Codex account share an email,
@@ -161,6 +171,9 @@ by the same key; `Usage.Extra` is the only new shape there.
 ## Code changes by file
 
 ### `accounts.go`
+
+**Deviation:** `findByEmail` moved here from `main.go` (it is a vault operation, and `rank` and
+`addHeadlessToken` call it) instead of staying where it was.
 
 ```go
 const (
@@ -325,7 +338,9 @@ later one wins and the case is covered by a test only for the documented shapes.
   punctuation stripping). A trailing period after `PM` is not captured.
 - `reLimit`: append `|out of credits`. (`usage limit` is already there; `Usage limit reached.`
   matches case-insensitively.)
-- `reAuth`: append `|401 unauthorized|missing bearer|not logged in`.
+- `reAuth`: append `|401 unauthorized|missing bearer`. **Deviation:** `not logged in` is left out.
+  Only `codex login status` prints it, which vibemon never runs as a child, while a failed Claude
+  turn quoting some other tool's "not logged in" would bench a healthy account for 24 hours.
 - Comment on `classify` gains one sentence: Codex prints its limit on stderr with exit 1 and names
   the reset as `try again at <date>`.
 - `Try again later.` without a time stays `outLimit` with the one-hour fallback bench; the
@@ -363,7 +378,7 @@ case a.kind() == kindClaude && a.HeadlessToken == "":
 
 - `wrapperFlags["kind"] = true`; `fs.StringVar(&o.Kind, "kind", "", "claude (default for exec) or codex")`.
   `cmdExec` resolves `""` to `kindClaude`; `cmdPick` resolves `""` to `"all"`. Any other value is
-  an error naming the three accepted ones.
+  an error naming the three accepted ones (`parseExecArgs` rejects it, `cmdExec` rejects `all`).
 - Default command when none or only flags are given: `claude` for `kindClaude`, `codex` for
   `kindCodex`.
 - `isHeadless(kind string, cmd []string) bool`: Claude as today (`-p`/`--print`); Codex when
@@ -567,7 +582,8 @@ is `errNeedsReauth` without any request.
 unrelated variables alone.
 
 `TestCodexKeyAndHome`: `codexKey("Max@X.io") == "codex:max@x.io"`, `codexHome` honours
-`VIBEMON_CODEX_HOMES`, `keyKind("codex:x") == kindCodex`, `keyKind("uuid") == kindClaude`.
+`VIBEMON_CODEX_HOMES`, `keyKind("codex:x") == kindCodex`, `keyKind("uuid") == kindClaude`, and
+`codexLoggedIn` follows `auth.json`.
 
 ### `limits_test.go`
 
@@ -598,8 +614,8 @@ Existing assertions keep passing because every `accountOrder` and `rank` call th
 - `rank(kindCodex, ...)` with an empty policy: runnable `[x]`, skipped `[y]` with reason
   containing `not logged in`.
 - With `prefs{Order: ["c", "b", "a"]}` (Claude keys only): `rank(kindCodex)` still yields `[x]`
-  (decision 8, second sentence). With `Order: ["codex:gone"]`: `rank(kindCodex)` yields nothing
-  (fail closed).
+  (decision 8, second sentence). With `CodexOrder: ["codex:gone@x.io"]`: `rank(kindCodex)` yields
+  nothing (fail closed).
 - A bench on `codex:x@x.io` and cached `Usage{Weekly: 100, ResetsAt future}` each drop `x` out.
 
 ### `exec_test.go`
@@ -716,6 +732,17 @@ One commit per step; each leaves `just check` green.
    list gains: a real `vibemon codex add` login, a real limit under `exec --kind codex`, the
    `try again at` zone. `README.md`: a "Codex (ChatGPT) accounts" section with the four commands
    and the Riker form, and `pick --json`'s `kind` field.
+
+## Verified during implementation (11.09.2026)
+
+- Both real homes answer the wham endpoint: `devops@wilde-it.com` is ChatGPT Pro at 0 percent with
+  the weekly window resetting 18.09.2026, `max.partenfelder@aso.nexus` is prolite at 100 percent
+  resetting 15.09.2026 19:59, the exact time the recorded limit line names. **The Pro seat reports
+  no session window either** (a single weekly window in the primary slot), which settles risk 2:
+  mapping by window length is right for both observed plans, and neither lands two windows in the
+  same gauge.
+- `vibemon pick --json` against the real vault carries `kind` on every row and leaves the Claude
+  rows otherwise unchanged.
 
 ## Self-review
 

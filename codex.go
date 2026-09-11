@@ -18,7 +18,7 @@ var codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
 // Codex (ChatGPT) accounts. One CODEX_HOME per login: codex keeps auth.json, config.toml and its
 // sessions there, so a directory is the whole identity. vibemon reads auth.json and never writes
-// it — codex owns those tokens and refreshes them in place.
+// it: codex owns those tokens and refreshes them in place.
 
 // codexHomesDir is where vibemon keeps the homes it manages. VIBEMON_CODEX_HOMES overrides it for
 // tests, mirroring VIBEMON_STATE. The user's own ~/.codex is never touched.
@@ -225,7 +225,7 @@ func codexChildEnv(home string) []string {
 // codexLogin runs `codex login` in home with stdio inherited: the browser flow needs a terminal to
 // print its URL to and a human to finish it.
 func codexLogin(home string) error {
-	fmt.Fprintf(os.Stderr, "vibemon: running `codex login` in %s — finish it in the browser\n", home)
+	fmt.Fprintf(os.Stderr, "vibemon: running `codex login` in %s; finish it in the browser\n", home)
 	cmd := exec.Command("codex", "login")
 	cmd.Env = codexChildEnv(home)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr

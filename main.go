@@ -175,13 +175,13 @@ func cmdRemove(args []string) error {
 	case wasActive:
 		fmt.Println("note: Claude Code is still signed in as this account — vibemon just stopped tracking it")
 	case isCodex:
-		fmt.Printf("note: the login is kept at %s — delete that directory to log the account out\n", home)
+		fmt.Printf("note: the login is kept at %s; delete that directory to log the account out\n", home)
 	}
 	return nil
 }
 
 // cmdCodexAdd tracks a ChatGPT account. With an email it adopts an existing home when that home is
-// already logged in — both of MaPa's were set up by hand — and only falls back to a browser login
+// already logged in (both of MaPa's were set up by hand), and only falls back to a browser login
 // when there is none. Bare, it logs a new account in and names the home after the email the usage
 // endpoint reports, because typing the email is how the wrong one gets registered.
 func cmdCodexAdd(args []string) error {
