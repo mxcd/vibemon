@@ -200,3 +200,20 @@ func codexUsageFor(a *Account) (Usage, error) {
 	a.NeedsReauth = false
 	return r.normalize(time.Now()), nil
 }
+
+// --- running a child ---------------------------------------------------------
+
+// codexChildEnv hands the child one home. A CODEX_HOME inherited from the caller's shell would
+// override ours, and OPENAI_API_KEY outranks the ChatGPT login: the run would bill the API instead
+// of the plan and never show up in this account's numbers.
+func codexChildEnv(home string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		switch strings.SplitN(kv, "=", 2)[0] {
+		case "CODEX_HOME", "OPENAI_API_KEY":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "CODEX_HOME="+home)
+}

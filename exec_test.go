@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ import (
 // fakeClaude is a shell stand-in for the CLI: each run pops one "exit|stdout|stderr" line from the
 // script file and appends its token and argv to a log, so a test can assert what exec did.
 const fakeClaude = `#!/bin/sh
-echo "token=$CLAUDE_CODE_OAUTH_TOKEN api=${ANTHROPIC_API_KEY:-unset} args=$*" >> "$FAKE_LOG"
+echo "token=$CLAUDE_CODE_OAUTH_TOKEN api=${ANTHROPIC_API_KEY:-unset} home=${CODEX_HOME:-unset} okey=${OPENAI_API_KEY:-unset} args=$*" >> "$FAKE_LOG"
 line=$(head -n 1 "$FAKE_SCRIPT")
 tail -n +2 "$FAKE_SCRIPT" > "$FAKE_SCRIPT.tmp" && mv "$FAKE_SCRIPT.tmp" "$FAKE_SCRIPT"
 code=$(printf '%s' "$line" | cut -d'|' -f1)
@@ -21,7 +22,7 @@ exit "${code:-0}"
 `
 
 type fakeRun struct {
-	dir, log, script string
+	dir, log, script, homes string
 }
 
 func setupFake(t *testing.T, lines ...string) fakeRun {
@@ -29,12 +30,17 @@ func setupFake(t *testing.T, lines ...string) fakeRun {
 	dir := t.TempDir()
 	t.Setenv("VIBEMON_STATE", filepath.Join(dir, "state"))
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api-must-not-leak")
+	t.Setenv("OPENAI_API_KEY", "sk-must-not-leak")
 	f := fakeRun{dir: dir, log: filepath.Join(dir, "log"), script: filepath.Join(dir, "script")}
 	t.Setenv("FAKE_LOG", f.log)
 	t.Setenv("FAKE_SCRIPT", f.script)
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(fakeClaude), 0o755); err != nil {
-		t.Fatal(err)
+	// The same stand-in answers to both names; which one runs is the caller's argv.
+	for _, name := range []string{"claude", "codex"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(fakeClaude), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	f.homes = codexHomes(t, "x@x.io", "y@x.io")
 	if err := os.WriteFile(f.script, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -207,10 +213,10 @@ func TestParseExecArgsStopsAtClaudeFlags(t *testing.T) {
 	if strings.Join(o.Command, " ") != "claude -p run the tests --output-format json" {
 		t.Errorf("child args mangled: %v", o.Command)
 	}
-	if !hasPositionalPrompt(o.Command) {
+	if !hasPositionalPrompt(kindClaude, o.Command) {
 		t.Error("prompt positional not detected")
 	}
-	if hasPositionalPrompt([]string{"claude", "-p", "--model", "opus", "--output-format", "json"}) {
+	if hasPositionalPrompt(kindClaude, []string{"claude", "-p", "--model", "opus", "--output-format", "json"}) {
 		t.Error("flag values mistaken for a prompt")
 	}
 }
@@ -224,5 +230,101 @@ func TestBuildArgsOwnsSessionAndModelFlags(t *testing.T) {
 	sid, resume := sessionFromArgs([]string{"claude", "--resume", "abc", "-p", "x"})
 	if sid != "abc" || !resume {
 		t.Errorf("caller's --resume must be honoured, got %q %v", sid, resume)
+	}
+}
+
+// A Codex review is one turn: a limit reruns the whole command under the next account, with that
+// account's CODEX_HOME and nothing of Claude's session or model surgery.
+func TestExecCodexRerunsUnderNextAccountOnLimit(t *testing.T) {
+	f := setupFake(t,
+		`1||ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:59 PM.`,
+		`0|{"type":"turn.completed"}|`,
+	)
+	code, out := runExec(t, "--kind", "codex", "--workdir", f.dir, "--json", "--",
+		filepath.Join(f.dir, "codex"), "exec", "--skip-git-repo-check", "-o", "out.md", "review this")
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d (%s)", code, out)
+	}
+	if !strings.Contains(out, `"kind":"codex"`) || !strings.Contains(out, `"account":"y@x.io"`) {
+		t.Errorf("the JSON must name the kind and the account that answered: %s", out)
+	}
+	if !strings.Contains(out, `"outcome":"limit"`) || !strings.Contains(out, `"outcome":"ok"`) {
+		t.Errorf("both attempts must be reported: %s", out)
+	}
+	at := f.attempts(t)
+	if len(at) != 2 {
+		t.Fatalf("want 2 attempts, got %v", at)
+	}
+	for i, want := range []string{"x@x.io", "y@x.io"} {
+		if !strings.Contains(at[i], "home="+filepath.Join(f.homes, want)) {
+			t.Errorf("attempt %d must run in %s's home: %s", i, want, at[i])
+		}
+		if !strings.Contains(at[i], "okey=unset") {
+			t.Errorf("OPENAI_API_KEY leaked into attempt %d; it would bill the API instead of the plan: %s", i, at[i])
+		}
+		if !strings.HasSuffix(at[i], "args=exec --skip-git-repo-check -o out.md review this") {
+			t.Errorf("attempt %d argv was rewritten: %s", i, at[i])
+		}
+	}
+	st := readFleet()
+	b, ok := st.benched("codex:x@x.io")
+	if !ok || !strings.Contains(b.Reason, "usage limit") {
+		t.Errorf("the spent account must be benched with the limit message, got %+v", b)
+	}
+	if st.turnsLastHour("codex:x@x.io") != 1 || st.turnsLastHour("codex:y@x.io") != 1 {
+		t.Errorf("one turn per account expected, got %+v", st.Turns)
+	}
+}
+
+func TestExecCodexRefusesClaudeOnlyFlags(t *testing.T) {
+	if _, err := parseExecArgs([]string{"--kind", "codex", "--model", "x"}); err == nil {
+		t.Error("--model must be refused with --kind codex; codex takes -m itself")
+	}
+	if _, err := parseExecArgs([]string{"--kind", "codex", "--session", "s"}); err == nil {
+		t.Error("--session must be refused with --kind codex; nothing resumes")
+	}
+	if _, err := parseExecArgs([]string{"--kind", "gpt"}); err == nil {
+		t.Error("an unknown kind must be an error")
+	}
+	o, err := parseExecArgs([]string{"--kind", "codex"})
+	if err != nil || strings.Join(o.Command, " ") != "codex" {
+		t.Errorf("bare --kind codex must default to the codex command, got %v %v", o.Command, err)
+	}
+	if !isHeadless(kindCodex, []string{"codex", "exec", "-p", "prof", "hi"}) {
+		t.Error("codex exec is the headless form")
+	}
+	if isHeadless(kindCodex, []string{"codex", "-p", "prof"}) {
+		t.Error("codex -p is --profile, not --print")
+	}
+	if !hasPositionalPrompt(kindCodex, []string{"codex", "exec", "-o", "f", "hi"}) {
+		t.Error("the codex prompt positional was missed")
+	}
+	if hasPositionalPrompt(kindCodex, []string{"codex", "exec", "-o", "f"}) {
+		t.Error("-o's value and the exec subcommand are not a prompt")
+	}
+}
+
+func TestCodexChildEnv(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/elsewhere")
+	t.Setenv("OPENAI_API_KEY", "sk-x")
+	t.Setenv("ANTHROPIC_API_KEY", "keep")
+	env := codexChildEnv("/homes/a@x.io")
+	homes := 0
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "CODEX_HOME="):
+			homes++
+			if kv != "CODEX_HOME=/homes/a@x.io" {
+				t.Errorf("inherited CODEX_HOME survived: %s", kv)
+			}
+		case strings.HasPrefix(kv, "OPENAI_API_KEY="):
+			t.Error("OPENAI_API_KEY must not reach the child: it outranks the ChatGPT login")
+		}
+	}
+	if homes != 1 {
+		t.Errorf("want exactly one CODEX_HOME, got %d", homes)
+	}
+	if !slices.Contains(env, "ANTHROPIC_API_KEY=keep") {
+		t.Error("unrelated variables must be left alone")
 	}
 }

@@ -289,10 +289,26 @@ func cmdPick(args []string) error {
 	if err != nil {
 		return err
 	}
+	kinds := []string{o.Kind}
+	if o.Kind == "" || o.Kind == kindAll {
+		kinds = []string{kindClaude, kindCodex}
+	}
 	st := readFleet()
-	runnable, skipped, project := rank(v, loadPrefs(), &st, o.pickOptions)
+	p := loadPrefs()
+	var runnable, skipped []candidate
+	var project *projectPolicy
+	for _, kind := range kinds {
+		opts := o.pickOptions
+		opts.Kind = kind
+		run, skip, proj := rank(v, p, &st, opts)
+		runnable, skipped = append(runnable, run...), append(skipped, skip...)
+		if proj != nil {
+			project = proj
+		}
+	}
 	if o.JSON {
 		type row struct {
+			Kind   string    `json:"kind"`
 			Email  string    `json:"email"`
 			Usage  *Usage    `json:"usage,omitempty"`
 			Reason string    `json:"reason,omitempty"`
@@ -300,10 +316,10 @@ func cmdPick(args []string) error {
 		}
 		out := map[string]any{"runnable": []row{}, "skipped": []row{}}
 		for _, c := range runnable {
-			out["runnable"] = append(out["runnable"].([]row), row{Email: c.Account.Email, Usage: c.Usage})
+			out["runnable"] = append(out["runnable"].([]row), row{Kind: c.Account.kind(), Email: c.Account.Email, Usage: c.Usage})
 		}
 		for _, c := range skipped {
-			out["skipped"] = append(out["skipped"].([]row), row{Email: c.Account.Email, Usage: c.Usage, Reason: c.Reason, Until: c.Until})
+			out["skipped"] = append(out["skipped"].([]row), row{Kind: c.Account.kind(), Email: c.Account.Email, Usage: c.Usage, Reason: c.Reason, Until: c.Until})
 		}
 		if project != nil {
 			out["project"] = project.Path
@@ -313,15 +329,17 @@ func cmdPick(args []string) error {
 	if project != nil {
 		fmt.Printf("project %s\n", project.Path)
 	}
-	for i, c := range runnable {
+	// One ">" per kind: each kind picks its own first runnable account.
+	firstOf := map[string]bool{}
+	for _, c := range runnable {
 		marker := " "
-		if i == 0 {
-			marker = ">"
+		if !firstOf[c.Account.kind()] {
+			marker, firstOf[c.Account.kind()] = ">", true
 		}
-		fmt.Printf("%s %-34s %s\n", marker, c.Account.Email, usageNote(c.Usage))
+		fmt.Printf("%s %-7s %-34s %s\n", marker, c.Account.kind(), c.Account.Email, usageNote(c.Usage))
 	}
 	for _, c := range skipped {
-		fmt.Printf("  %-34s skipped: %s%s\n", c.Account.Email, c.Reason, untilNote(c.Until))
+		fmt.Printf("  %-7s %-34s skipped: %s%s\n", c.Account.kind(), c.Account.Email, c.Reason, untilNote(c.Until))
 	}
 	if len(runnable) == 0 {
 		return fmt.Errorf("no account has headroom")
@@ -336,6 +354,9 @@ func usageNote(u *Usage) string {
 	s := fmt.Sprintf("session %3.0f%% (%s)  weekly %3.0f%% (%s)", u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 	if u.Scoped != nil {
 		s += fmt.Sprintf("  %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
+	}
+	for _, g := range u.Extra {
+		s += fmt.Sprintf("  %s %3.0f%%", g.Label, g.Percent)
 	}
 	return s + "  as of " + u.FetchedAt.Local().Format("15:04")
 }

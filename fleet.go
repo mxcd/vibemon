@@ -180,6 +180,9 @@ type candidate struct {
 	Until   time.Time // when a passed-over account comes back, zero if unknown
 }
 
+// kindAll asks pick for both kinds at once; rank itself always runs one kind.
+const kindAll = "all"
+
 type pickOptions struct {
 	Dir     string
 	Kind    string // kindClaude (default) or kindCodex; rank handles exactly one
