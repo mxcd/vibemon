@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -31,10 +33,10 @@ func main() {
 		err = cmdSwitch(os.Args[2])
 	case "remove", "forget":
 		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: vibemon remove <email>")
+			err = fmt.Errorf("usage: vibemon remove [--kind claude|codex] <email>")
 			break
 		}
-		err = cmdRemove(os.Args[2])
+		err = cmdRemove(os.Args[2:])
 	case "usage":
 		err = cmdUsage()
 	case "add-token":
@@ -49,6 +51,12 @@ func main() {
 			break
 		}
 		err = cmdToken(os.Args[2])
+	case "codex":
+		if len(os.Args) < 3 || os.Args[2] != "add" {
+			err = fmt.Errorf("usage: vibemon codex add [<email>]")
+			break
+		}
+		err = cmdCodexAdd(os.Args[3:])
 	case "pick":
 		err = cmdPick(os.Args[2:])
 	case "exec":
@@ -71,16 +79,21 @@ func usageText() {
   vibemon capture         store the account Claude Code is currently logged into
   vibemon list             list stored accounts (* marks the active one)
   vibemon switch <email>   make an account active for the next Claude Code start
-  vibemon remove <email>   forget an account (does not log Claude Code out)
+  vibemon remove [--kind claude|codex] <email>
+                           forget an account (does not log Claude Code or codex out)
   vibemon usage            show usage for every stored account
 
   vibemon add-token <email> [token]   store a 'claude setup-token' token for headless runs
   vibemon token <email>               print an account's headless token (for scripts)
-  vibemon pick [--workdir d] [--model m] [--json]
+  vibemon codex add [<email>]         track a ChatGPT account: adopts an existing
+                                      ~/.vibemon/codex/<email>, else runs 'codex login' there
+  vibemon pick [--kind claude|codex|all] [--workdir d] [--model m] [--json]
                            show which account exec would use there, and why the others are skipped
   vibemon exec [flags] [--] [claude args...]
                            run claude under the project's first available account; with -p,
-                           resume under the next account when a limit hits (vibemon exec --help)`)
+                           resume under the next account when a limit hits (vibemon exec --help)
+  vibemon exec --kind codex [flags] [--] codex exec ...
+                           the same for a ChatGPT account, under its own CODEX_HOME`)
 }
 
 func cmdCapture() error {
@@ -102,6 +115,7 @@ func cmdList() error {
 		return nil
 	}
 	active := activeUUID(v)
+	kind := ""
 	for _, a := range v.sorted() {
 		marker := " "
 		if a.UUID == active {
@@ -111,36 +125,131 @@ func cmdList() error {
 		if a.NeedsReauth {
 			flag = "  [needs re-auth]"
 		}
-		if a.HeadlessToken != "" {
-			flag += "  [token]"
+		if a.kind() == kindCodex {
+			marker = " " // there is no active ChatGPT account; codex reads its home per run
+			if !codexLoggedIn(codexHome(a.Email)) {
+				flag += "  [not logged in]"
+			}
+		} else {
+			if a.HeadlessToken != "" {
+				flag += "  [token]"
+			}
+			if a.OAuth.AccessToken == "" {
+				flag += "  [no login captured]"
+			}
 		}
-		if a.OAuth.AccessToken == "" {
-			flag += "  [no login captured]"
+		if kind != "" && kind != a.kind() {
+			fmt.Println() // a blank line between the two groups
 		}
+		kind = a.kind()
 		fmt.Printf("%s %-34s %-22s %s%s\n", marker, a.Email, a.planLabel(), a.OrgName, flag)
 	}
 	return nil
 }
 
-func cmdRemove(email string) error {
+func cmdRemove(args []string) error {
+	kind := ""
+	if len(args) > 1 && args[0] == "--kind" {
+		kind, args = args[1], args[2:]
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: vibemon remove [--kind claude|codex] <email>")
+	}
 	unlock := lockVault()
 	defer unlock()
 	v, err := loadVault()
 	if err != nil {
 		return err
 	}
-	target, err := findByEmail(v, "", email)
+	target, err := findByEmail(v, kind, args[0])
 	if err != nil {
 		return err
 	}
-	wasActive := target.UUID == activeUUID(v)
+	wasActive := target.kind() == kindClaude && target.UUID == activeUUID(v)
+	isCodex, home := target.kind() == kindCodex, codexHome(target.Email)
 	if err := forget(v, target.UUID); err != nil {
 		return err
 	}
 	fmt.Printf("removed %s from vibemon\n", target.Email)
-	if wasActive {
+	switch {
+	case wasActive:
 		fmt.Println("note: Claude Code is still signed in as this account — vibemon just stopped tracking it")
+	case isCodex:
+		fmt.Printf("note: the login is kept at %s — delete that directory to log the account out\n", home)
 	}
+	return nil
+}
+
+// cmdCodexAdd tracks a ChatGPT account. With an email it adopts an existing home when that home is
+// already logged in — both of MaPa's were set up by hand — and only falls back to a browser login
+// when there is none. Bare, it logs a new account in and names the home after the email the usage
+// endpoint reports, because typing the email is how the wrong one gets registered.
+func cmdCodexAdd(args []string) error {
+	email := ""
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return fmt.Errorf("usage: vibemon codex add [<email>]")
+		}
+		if email != "" {
+			return fmt.Errorf("one email at a time")
+		}
+		email = a
+	}
+	unlock := lockVault()
+	defer unlock()
+	v, err := loadVault()
+	if err != nil {
+		return err
+	}
+
+	home := ""
+	if email != "" {
+		home = codexHome(email)
+		if _, err := fetchCodexUsage(home); err != nil {
+			if !errors.Is(err, errNeedsReauth) {
+				return err // a throttle or a server fault: try again later, do not log in over it
+			}
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				return err
+			}
+			linkConfig(home)
+			if err := codexLogin(home); err != nil {
+				return err
+			}
+		}
+	} else {
+		tmp := filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid()))
+		if err := os.MkdirAll(tmp, 0o700); err != nil {
+			return err
+		}
+		linkConfig(tmp)
+		if err := codexLogin(tmp); err != nil {
+			return err
+		}
+		r, err := fetchCodexUsage(tmp)
+		if err != nil {
+			return err
+		}
+		home = codexHome(r.Email)
+		if _, err := os.Stat(home); err == nil {
+			os.RemoveAll(tmp)
+			return fmt.Errorf("%s is already set up; run `vibemon codex add %s` to track or re-login it", r.Email, r.Email)
+		}
+		if err := os.Rename(tmp, home); err != nil {
+			return err
+		}
+	}
+
+	a, u, err := registerCodex(v, home)
+	if err != nil {
+		return err
+	}
+	if email != "" && !strings.EqualFold(a.Email, email) {
+		return fmt.Errorf("%s is logged in as %s, not %s", home, a.Email, email)
+	}
+	fmt.Printf("added %s (%s)  session %.0f%%  weekly %.0f%% (%s)\n",
+		a.Email, a.planLabel(), u.Session.Percent, u.Weekly.Percent, until(u.Weekly.ResetsAt))
+	cacheUsage(map[string]Usage{a.UUID: u})
 	return nil
 }
 
@@ -198,6 +307,9 @@ func cmdUsage() error {
 			marker, a.Email, u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 		if u.Scoped != nil {
 			line += fmt.Sprintf("   %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
+		}
+		for _, g := range u.Extra {
+			line += fmt.Sprintf("   %s %3.0f%%", g.Label, g.Percent)
 		}
 		fmt.Println(line)
 	}

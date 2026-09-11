@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -216,4 +218,81 @@ func codexChildEnv(home string) []string {
 		env = append(env, kv)
 	}
 	return append(env, "CODEX_HOME="+home)
+}
+
+// --- registration ------------------------------------------------------------
+
+// codexLogin runs `codex login` in home with stdio inherited: the browser flow needs a terminal to
+// print its URL to and a human to finish it.
+func codexLogin(home string) error {
+	fmt.Fprintf(os.Stderr, "vibemon: running `codex login` in %s — finish it in the browser\n", home)
+	cmd := exec.Command("codex", "login")
+	cmd.Env = codexChildEnv(home)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("codex login in %s: %w", home, err)
+	}
+	if !codexLoggedIn(home) {
+		return fmt.Errorf("codex login left no auth.json in %s", home)
+	}
+	return nil
+}
+
+// linkConfig shares the user's own codex settings (model, effort, trust levels) with a new home by
+// symlink. A failure is a note, not a fault: the home works without it, on codex's defaults.
+func linkConfig(home string) {
+	src := filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	dst := filepath.Join(home, "config.toml")
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return
+	}
+	if err := os.Symlink(src, dst); err != nil {
+		fmt.Fprintf(os.Stderr, "vibemon: could not link %s into %s: %v\n", src, home, err)
+	}
+}
+
+// registerCodex identifies the login in home through the usage endpoint and files it in the vault.
+// The email is read back from the endpoint rather than typed, and the home must already sit where
+// vibemon expects it: moving or symlinking a login the user set up elsewhere is not vibemon's call.
+func registerCodex(v Vault, home string) (*Account, Usage, error) {
+	r, err := fetchCodexUsage(home)
+	if err != nil {
+		if errors.Is(err, errNeedsReauth) {
+			return nil, Usage{}, fmt.Errorf("%s has no usable login: %w", home, err)
+		}
+		return nil, Usage{}, err
+	}
+	if !strings.Contains(r.Email, "@") {
+		return nil, Usage{}, fmt.Errorf("%s reported no email; cannot file it", home)
+	}
+	if want := codexHome(r.Email); cleanPath(home) != cleanPath(want) {
+		return nil, Usage{}, fmt.Errorf("%s is logged in as %s, whose home belongs at %s", home, r.Email, want)
+	}
+	key := codexKey(r.Email)
+	a := v[key]
+	if a == nil {
+		a = &Account{UUID: key, CapturedAt: time.Now()}
+		v[key] = a
+	}
+	a.Kind, a.Email, a.Label, a.Plan, a.NeedsReauth = kindCodex, r.Email, r.Email, r.PlanType, false
+	if err := saveVault(v); err != nil {
+		return nil, Usage{}, err
+	}
+	appendCodexOrder(key)
+	return a, r.normalize(time.Now()), nil
+}
+
+// appendCodexOrder puts a newly registered account at the end of the Codex priority list, so the
+// order accounts were added in is the order exec fills them up in and picking works without a trip
+// to the settings window. An account already in the list keeps its place.
+func appendCodexOrder(key string) {
+	p := loadPrefs()
+	if slices.Contains(p.CodexOrder, key) {
+		return
+	}
+	p.CodexOrder = append(p.CodexOrder, key)
+	_ = savePrefs(p)
 }
