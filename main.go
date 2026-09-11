@@ -122,16 +122,6 @@ func cmdList() error {
 	return nil
 }
 
-// findByEmail resolves the user-facing identifier used by every command that takes one.
-func findByEmail(v Vault, email string) (*Account, error) {
-	for _, a := range v {
-		if strings.EqualFold(a.Email, email) {
-			return a, nil
-		}
-	}
-	return nil, fmt.Errorf("no stored account matching %q — run `vibemon list`", email)
-}
-
 func cmdRemove(email string) error {
 	unlock := lockVault()
 	defer unlock()
@@ -139,7 +129,7 @@ func cmdRemove(email string) error {
 	if err != nil {
 		return err
 	}
-	target, err := findByEmail(v, email)
+	target, err := findByEmail(v, "", email)
 	if err != nil {
 		return err
 	}
@@ -161,7 +151,7 @@ func cmdSwitch(email string) error {
 	if err != nil {
 		return err
 	}
-	target, err := findByEmail(v, email)
+	target, err := findByEmail(v, kindClaude, email)
 	if err != nil {
 		return err
 	}
@@ -279,7 +269,7 @@ func cmdToken(email string) error {
 	if err != nil {
 		return err
 	}
-	a, err := findByEmail(v, email)
+	a, err := findByEmail(v, kindClaude, email)
 	if err != nil {
 		return err
 	}

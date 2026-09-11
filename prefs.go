@@ -36,8 +36,9 @@ type projectPolicy struct {
 type prefs struct {
 	Density    density         `json:"density"`
 	AutoSwitch bool            `json:"autoSwitch"`
-	Preferred  string          `json:"preferred,omitempty"` // account UUID to come home to
-	Order      []string        `json:"order,omitempty"`     // default exec priority when no project matches
+	Preferred  string          `json:"preferred,omitempty"`  // account UUID to come home to
+	Order      []string        `json:"order,omitempty"`      // default exec priority for Claude accounts
+	CodexOrder []string        `json:"codexOrder,omitempty"` // the same, for ChatGPT (Codex) accounts
 	Projects   []projectPolicy `json:"projects,omitempty"`
 }
 
@@ -62,6 +63,7 @@ func loadPrefs() prefs {
 	p.AutoSwitch = stored.AutoSwitch
 	p.Preferred = stored.Preferred
 	p.Order = stored.Order
+	p.CodexOrder = stored.CodexOrder
 	p.Projects = stored.Projects
 	return p
 }
@@ -102,6 +104,7 @@ func migrateAccountKey(old, next string) {
 	}
 	p := loadPrefs()
 	swap(p.Order)
+	swap(p.CodexOrder)
 	for i := range p.Projects {
 		swap(p.Projects[i].Accounts)
 	}
@@ -155,26 +158,49 @@ func cleanPath(p string) string {
 	return filepath.Clean(p)
 }
 
-// accountOrder is the priority list exec uses for dir: the project's, else the global order, else
-// every account alphabetically. An explicit list whose entries have all left the vault yields
-// nothing: a policy that names accounts must never widen to "anyone" behind the user's back.
-func (p prefs) accountOrder(v Vault, dir string) (keys []string, project *projectPolicy) {
+// accountOrder is the priority list exec uses for dir and kind: the project's entries of that kind,
+// else the global order of that kind, else every stored account of that kind alphabetically. An
+// explicit list whose entries have all left the vault yields nothing: a policy that names accounts
+// must never widen to "anyone" behind the user's back. A list that names none of the requested kind
+// was written before that kind existed and excludes nothing, so the next source down applies.
+func (p prefs) accountOrder(v Vault, dir, kind string) (keys []string, project *projectPolicy) {
+	if kind == "" {
+		kind = kindClaude
+	}
 	project = p.projectFor(dir)
-	src := p.Order
-	if project != nil && len(project.Accounts) > 0 {
-		src = project.Accounts
+	global := p.Order
+	if kind == kindCodex {
+		global = p.CodexOrder
+	}
+	src := ofKind(global, kind)
+	if project != nil {
+		if fromProject := ofKind(project.Accounts, kind); len(fromProject) > 0 {
+			src = fromProject
+		}
 	}
 	if len(src) == 0 {
 		for _, a := range v.sorted() {
-			keys = append(keys, a.UUID)
+			if a.kind() == kind {
+				keys = append(keys, a.UUID)
+			}
 		}
 		return keys, project
 	}
 	seen := map[string]bool{}
 	for _, k := range src {
-		if _, ok := v[k]; ok && !seen[k] {
+		if a, ok := v[k]; ok && !seen[k] && a.kind() == kind {
 			keys, seen[k] = append(keys, k), true
 		}
 	}
 	return keys, project
+}
+
+func ofKind(keys []string, kind string) []string {
+	var out []string
+	for _, k := range keys {
+		if keyKind(k) == kind {
+			out = append(out, k)
+		}
+	}
+	return out
 }

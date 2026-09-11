@@ -3,16 +3,82 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func testVault() Vault {
 	return Vault{
-		"a": {UUID: "a", Email: "a@x.io", HeadlessToken: "sk-ant-oat01-a", OAuth: OAuth{AccessToken: "la"}},
-		"b": {UUID: "b", Email: "b@x.io", HeadlessToken: "sk-ant-oat01-b", OAuth: OAuth{AccessToken: "lb"}},
-		"c": {UUID: "c", Email: "c@x.io", HeadlessToken: "sk-ant-oat01-c"},
-		"d": {UUID: "d", Email: "d@x.io", OAuth: OAuth{AccessToken: "ld"}}, // login only, no token
+		"a":            {UUID: "a", Email: "a@x.io", HeadlessToken: "sk-ant-oat01-a", OAuth: OAuth{AccessToken: "la"}},
+		"b":            {UUID: "b", Email: "b@x.io", HeadlessToken: "sk-ant-oat01-b", OAuth: OAuth{AccessToken: "lb"}},
+		"c":            {UUID: "c", Email: "c@x.io", HeadlessToken: "sk-ant-oat01-c"},
+		"d":            {UUID: "d", Email: "d@x.io", OAuth: OAuth{AccessToken: "ld"}}, // login only, no token
+		"codex:x@x.io": {UUID: "codex:x@x.io", Email: "x@x.io", Kind: kindCodex},
+		"codex:y@x.io": {UUID: "codex:y@x.io", Email: "y@x.io", Kind: kindCodex},
+	}
+}
+
+// codexHomes points VIBEMON_CODEX_HOMES at a temp dir and logs the named accounts in there.
+func codexHomes(t *testing.T, loggedIn ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("VIBEMON_CODEX_HOMES", dir)
+	for _, email := range loggedIn {
+		home := filepath.Join(dir, email)
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"tokens":{"access_token":"t","account_id":"a"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// The two kinds never mix: a Claude run must not be offered a ChatGPT account and the other way round.
+func TestRankPartitionsByKind(t *testing.T) {
+	v := testVault()
+	codexHomes(t, "x@x.io")
+	st := &fleetState{Usage: map[string]Usage{}, Bench: map[string]benchEntry{}}
+
+	run, skip, _ := rank(v, prefs{}, st, pickOptions{Dir: "/x", Kind: kindClaude, Ceiling: 90})
+	for _, c := range append(append([]candidate{}, run...), skip...) {
+		if c.Account.kind() == kindCodex {
+			t.Fatalf("a Claude pick listed a Codex account: %v", c.Account.Email)
+		}
+	}
+
+	run, skip, _ = rank(v, prefs{}, st, pickOptions{Dir: "/x", Kind: kindCodex, Ceiling: 90})
+	if len(run) != 1 || run[0].Account.Email != "x@x.io" {
+		t.Fatalf("codex: want [x@x.io] runnable, got %v", emails(run))
+	}
+	if len(skip) != 1 || !strings.Contains(skip[0].Reason, "not logged in") {
+		t.Fatalf("a Codex account without a home login must be skipped, got %+v", skip)
+	}
+
+	// A global order written before Codex existed names no Codex key and must exclude nothing.
+	run, _, _ = rank(v, prefs{Order: []string{"c", "b", "a"}}, st, pickOptions{Dir: "/x", Kind: kindCodex, Ceiling: 90})
+	if len(run) != 1 || run[0].Account.Email != "x@x.io" {
+		t.Fatalf("claude-only order must not starve codex picking, got %v", emails(run))
+	}
+	// One that does name Codex keys fails closed when they are gone.
+	run, _, _ = rank(v, prefs{CodexOrder: []string{"codex:gone@x.io"}}, st, pickOptions{Dir: "/x", Kind: kindCodex, Ceiling: 90})
+	if len(run) != 0 {
+		t.Fatalf("a stale codex order must yield nothing, got %v", emails(run))
+	}
+
+	// A bench and spent cached numbers each drop the one runnable account out.
+	st.Bench["codex:x@x.io"] = benchEntry{Until: time.Now().Add(time.Hour), Reason: "usage limit"}
+	if run, _, _ = rank(v, prefs{}, st, pickOptions{Dir: "/x", Kind: kindCodex, Ceiling: 90}); len(run) != 0 {
+		t.Fatalf("a benched codex account must not run, got %v", emails(run))
+	}
+	st.Bench = map[string]benchEntry{}
+	reset := time.Now().Add(4 * 24 * time.Hour)
+	st.Usage["codex:x@x.io"] = Usage{Weekly: Gauge{Label: "Weekly", Percent: 100, ResetsAt: &reset}, FetchedAt: time.Now()}
+	run, skip, _ = rank(v, prefs{}, st, pickOptions{Dir: "/x", Kind: kindCodex, Ceiling: 90})
+	if len(run) != 0 || len(skip) != 2 {
+		t.Fatalf("a spent codex account must be skipped, got run %v skip %v", emails(run), emails(skip))
 	}
 }
 
@@ -95,7 +161,7 @@ func TestRankFollowsProjectOrderAndSkipsSpent(t *testing.T) {
 func TestAccountOrderFailsClosed(t *testing.T) {
 	v := testVault()
 	p := prefs{Projects: []projectPolicy{{Path: "/p", Accounts: []string{"gone"}}}}
-	keys, proj := p.accountOrder(v, "/p")
+	keys, proj := p.accountOrder(v, "/p", kindClaude)
 	if proj == nil || len(keys) != 0 {
 		t.Fatalf("want no keys under a stale project policy, got %v", keys)
 	}
@@ -111,11 +177,11 @@ func emails(cs []candidate) []string {
 
 func TestAccountOrderFallsBackToEveryone(t *testing.T) {
 	v := testVault()
-	keys, _ := prefs{}.accountOrder(v, "/x")
+	keys, _ := prefs{}.accountOrder(v, "/x", kindClaude)
 	if len(keys) != 4 {
 		t.Fatalf("no policy at all must mean every account, got %v", keys)
 	}
-	keys, _ = prefs{Order: []string{"b", "b", "a"}}.accountOrder(v, "/x")
+	keys, _ = prefs{Order: []string{"b", "b", "a"}}.accountOrder(v, "/x", kindClaude)
 	if len(keys) != 2 || keys[0] != "b" || keys[1] != "a" {
 		t.Fatalf("duplicates must collapse, got %v", keys)
 	}
