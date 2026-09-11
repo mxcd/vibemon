@@ -4,6 +4,9 @@ Task `aso/vibemon/codex-accounts`, branch `task/codex-accounts` (`a27e0ed..205b6
 `main`), reviewed 11.09.2026 against `docs/plan/impl/codex-accounts.md`.
 Reviewer: Fable 5.1. Codex round 1: gpt-6-astra high, ran to completion (no quota limit), verdict
 REJECT with 3 MAJOR and 2 MINOR; all five were re-verified by hand below, one reclassified.
+Round 2 (re-review of fix commit `16dc5cc`, 11.09.2026 13:15): Codex round 2 ran to completion,
+two MINOR, see "Round 2" at the end. Final verdict APPROVE with three open MINORs for a
+follow-up commit.
 Findings are also in `/Users/mapa/.riker/run/aso/vibemon/codex-accounts/findings.json` for inline
 comments. Screenshots: `docs/plan/impl/screens/codex-accounts/`.
 
@@ -19,15 +22,13 @@ real Codex limit and 401 lines through `classify` and `parseReset`, kind-partiti
 the fail-closed case, and the headless rerun asserting `CODEX_HOME` per attempt and no
 `OPENAI_API_KEY` on the child.
 
-It is rejected for one reason: `vibemon codex add` can move a directory that CLAUDE.md says is
-never moved. `codexHome(email)` joins the typed argument onto `~/.vibemon/codex` without
-validation, so `vibemon codex add ../../.codex` resolves to `~/.codex` (verified with
-`filepath.Join`), and the mismatch branch then renames that home to the reported email's canonical
-path whenever that path does not exist yet. On this machine the aso home exists and the command
-errors out, but on any other machine, or for a third account, it relocates the interactive login.
-The same branch renames an existing per-account home when the browser signs into a different
-account than the one asked for, which the plan said to reject. Both close with one guard (validate
-the email, rename only the temporary `.login-<pid>` home) and one test. Nothing else blocks.
+Round 1 rejected it for one reason: `vibemon codex add` could move a directory CLAUDE.md says is
+never moved (typed email used as a path segment, plus a rename of a user-named home on a mismatched
+login). Commit `16dc5cc` closes both with `codexEmailOK` and `placeCodexHome`, each with a test that
+pins the concrete `../../.codex` traversal, and answers every other round 1 finding. Round 2
+verified each resolution in code and in the re-shot screens, reran the gates (all green, 19
+Codex-related tests pass) and found three MINORs, none a correctness or security defect, each a
+one-line fix. Approved; the three are listed under "Round 2" for the follow-up.
 
 ## Findings
 
@@ -134,4 +135,51 @@ finding is addressed in code or docs.
 - Impeccable ran degraded (single context, detector inline) because the reviewer role writes only
   the review file and screenshots; the design findings above are the reviewer's own.
 
-VERDICT: REJECT
+## Round 2 (re-review of `16dc5cc`)
+
+Every round 1 resolution verified, in code and by rerunning the gates and re-shooting the screens:
+
+- Traversal (MAJOR): `codexEmailOK` runs on the typed argument, the reported address and inside
+  `placeCodexHome`; `TestCodexEmailOK` asserts the guard list and that `codexHome("../../.codex")`
+  still resolves to the parent's `.codex`, so the test fails the day the guard becomes moot.
+  Verified fixed.
+- Rename of a named home (MAJOR): `placeCodexHome(home, temporary, reported, asked)` returns the
+  plan's error on mismatch and moves only a `.login-<pid>` home, never over an existing one;
+  `TestPlaceCodexHome` covers match, mismatch with the named home still on disk, move, collision
+  and a traversing address. `registerCodex` keeps its own mismatch check as a second fence.
+  Verified fixed.
+- `findByEmail` order (MINOR): address scan first, exact key as fallback; the stub case is in
+  `TestFindByEmailAcrossKinds` and `codex:a@x.io` still resolves by key. Verified fixed.
+- Vault lock across login (MINOR): `lockVault()` now sits directly before `loadVault` and covers
+  only that and `registerCodex`. Verified fixed.
+- Order append on re-registration (MINOR): `registerCodex` appends only when the key was not in
+  the vault. Verified fixed in code; not covered by a test (see round 2 finding 2).
+- Temporary home cleanup (MINOR): one `defer` removes a temporary home on every path that does not
+  file it and says so on stderr when it discards a working login. Verified fixed for every path
+  the process lives through (see round 2 finding 1 for the one it does not).
+- 5-day JWT (MINOR): added to the CLAUDE.md unverified list with the mechanism and the self-heal
+  path. Verified documented.
+- Stray separator, hollow dot, `ChatGPT · ` (DESIGN): re-shot at 390px and 1440px; a spent Codex
+  row now reads `100%` with `resets 4d 7h`, the dot is hidden, the plan reads `ChatGPT`. Verified
+  fixed.
+
+Gates: `go build`, `go vet`, `gofmt -l` empty, `go test -count=1 ./...` passes.
+
+Codex round 2 (gpt-6-astra high, exit 0, verdict REJECT on two MINORs): both confirmed as stated,
+neither blocks. Open findings after round 2, all MINOR, for one follow-up commit:
+
+- **MINOR** `frontend/index.html:201` - the "leave out a window the account does not have" rule
+  keys on `percent > 0 || resetsAt`, so a Claude row whose 5 h window is idle and carries no reset
+  time now reads `12%` alone while its neighbours read `34% · 61%`; the single number is ambiguous
+  (session or weekly?) and the Claude group loses its uniform shape. Fix: apply the omission only
+  for `a.kind === 'codex'`; Claude always has both windows.
+- **MINOR** `main.go:211` - Ctrl-C during the browser login kills vibemon and the child
+  together, and a signal does not run the cleanup defer, so `.login-<pid>` stays behind (without a
+  login, since the flow never finished). Fix: sweep stale `.login-*` directories at the start of a
+  bare `codex add`, which is smaller than a signal handler and also catches a crash. (Codex r2.)
+- **MINOR** `codex.go:319` - the first-registration-only append to `codexOrder` has no test.
+  `registerCodex` writes the vault through the keychain, which is why none exists; if a test is
+  wanted, lift the `known` decision into a small pure helper and test that. Accepted without a
+  test for now. (Codex r2.)
+
+VERDICT: APPROVE
