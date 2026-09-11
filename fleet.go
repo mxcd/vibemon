@@ -180,8 +180,12 @@ type candidate struct {
 	Until   time.Time // when a passed-over account comes back, zero if unknown
 }
 
+// kindAll asks pick for both kinds at once; rank itself always runs one kind.
+const kindAll = "all"
+
 type pickOptions struct {
 	Dir     string
+	Kind    string // kindClaude (default) or kindCodex; rank handles exactly one
 	Model   string
 	Only    string   // force one account by email
 	Exclude []string // emails
@@ -193,10 +197,13 @@ type pickOptions struct {
 // ranked on its own, whether or not the policy lists it.
 func rank(v Vault, p prefs, st *fleetState, o pickOptions) (runnable, skipped []candidate, project *projectPolicy) {
 	now := time.Now()
-	keys, project := p.accountOrder(v, o.Dir)
+	if o.Kind == "" {
+		o.Kind = kindClaude
+	}
+	keys, project := p.accountOrder(v, o.Dir, o.Kind)
 	if o.Only != "" {
 		keys = nil
-		if a, err := findByEmail(v, o.Only); err == nil {
+		if a, err := findByEmail(v, o.Kind, o.Only); err == nil {
 			keys = []string{a.UUID}
 		}
 	}
@@ -209,7 +216,9 @@ func rank(v Vault, p prefs, st *fleetState, o pickOptions) (runnable, skipped []
 		switch {
 		case containsFold(o.Exclude, a.Email):
 			c.Reason = "excluded"
-		case a.HeadlessToken == "":
+		case a.kind() == kindCodex && !codexLoggedIn(codexHome(a.Email)):
+			c.Reason = "not logged in (vibemon codex add " + a.Email + ")"
+		case a.kind() == kindClaude && a.HeadlessToken == "":
 			c.Reason = "no headless token (vibemon add-token)"
 		default:
 			if b, ok := st.benched(key); ok {

@@ -18,6 +18,13 @@ const (
 	oauthKey     = "claudeAiOauth"
 )
 
+// Account kinds. A Claude account carries Anthropic credentials; a Codex account is a ChatGPT
+// login that lives in its own CODEX_HOME and carries no secret here at all.
+const (
+	kindClaude = "claude"
+	kindCodex  = "codex"
+)
+
 // OAuth mirrors the claudeAiOauth object inside Claude Code's keychain blob. Field names and
 // casing must match exactly — Claude Code reads this back.
 type OAuth struct {
@@ -37,7 +44,7 @@ func (o OAuth) expiresSoon() bool {
 	return time.UnixMilli(o.ExpiresAt).Before(time.Now().Add(5 * time.Minute))
 }
 
-// Account is one stored Claude identity.
+// Account is one stored identity: a Claude login or a ChatGPT (Codex) one.
 type Account struct {
 	UUID     string `json:"uuid"`
 	Email    string `json:"email"`
@@ -55,11 +62,27 @@ type Account struct {
 	OAuthAccount  json.RawMessage `json:"oauthAccount,omitempty"`
 	NeedsReauth   bool            `json:"needsReauth,omitempty"`
 	CapturedAt    time.Time       `json:"capturedAt"`
+	// Kind is empty on every entry stored before Codex support and reads as claude, so the vault
+	// on disk did not change.
+	Kind string `json:"kind,omitempty"`
+}
+
+func (a *Account) kind() string {
+	if a.Kind == "" {
+		return kindClaude
+	}
+	return a.Kind
 }
 
 // planLabel renders the subscription in the terms Anthropic bills in: a team seat tier when there
 // is one, otherwise the rate limit multiplier that actually governs the numbers on screen.
 func (a *Account) planLabel() string {
+	if a.kind() == kindCodex {
+		if a.Plan == "" {
+			return "ChatGPT"
+		}
+		return "ChatGPT · " + a.Plan // the raw plan_type: pro, prolite, plus, team
+	}
 	if seat := strings.ToLower(a.SeatTier); seat != "" {
 		switch seat {
 		case "premium":
@@ -131,7 +154,13 @@ func (v Vault) sorted() []*Account {
 	for _, a := range v {
 		out = append(out, a)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	// Kind first so Claude rows come before Codex ones and each kind forms a group in every list.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].kind() != out[j].kind() {
+			return out[i].kind() < out[j].kind()
+		}
+		return out[i].Email < out[j].Email
+	})
 	return out
 }
 
@@ -276,6 +305,30 @@ func claudeSessionsRunning() int {
 // Capture a login for the same email and the numbers appear.
 var errHeadlessOnly = errors.New("headless token only, no usage: capture a login for this email")
 
+// findByEmail resolves the user-facing identifier used by every command that takes one. kind ""
+// matches any kind but only when the email is unambiguous. The address is matched first and the
+// vault key only as a fallback: a token-only Claude account is keyed by its own email, and letting
+// that key win would quietly resolve one of two same-email accounts instead of asking which.
+func findByEmail(v Vault, kind, email string) (*Account, error) {
+	var found *Account
+	for _, a := range v {
+		if !strings.EqualFold(a.Email, email) || (kind != "" && a.kind() != kind) {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("%q is both a Claude and a ChatGPT account: say --kind claude or --kind codex", email)
+		}
+		found = a
+	}
+	if found != nil {
+		return found, nil
+	}
+	if a, ok := v[email]; ok && (kind == "" || a.kind() == kind) {
+		return a, nil
+	}
+	return nil, fmt.Errorf("no stored account matching %q — run `vibemon list`", email)
+}
+
 // addHeadlessToken stores a setup-token on the account matching email, creating a token-only entry
 // keyed by the email when no captured login exists yet.
 func addHeadlessToken(v Vault, email, token string) (*Account, error) {
@@ -287,7 +340,7 @@ func addHeadlessToken(v Vault, email, token string) (*Account, error) {
 	if !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("%q is not an email address", email)
 	}
-	a, err := findByEmail(v, email)
+	a, err := findByEmail(v, kindClaude, email)
 	if err != nil {
 		key := strings.ToLower(email)
 		a = &Account{UUID: key, Email: email, Label: email, CapturedAt: time.Now()}
@@ -340,7 +393,8 @@ func capture() (*Account, error) {
 	// A login capture for an email that was previously added by token alone: keep the token, drop
 	// the stub so the account exists once, under its real UUID.
 	for key, existing := range v {
-		if strings.EqualFold(existing.Email, a.Email) {
+		// A Codex account may share the email; it is a different login and must survive untouched.
+		if existing.kind() == kindClaude && strings.EqualFold(existing.Email, a.Email) {
 			a.HeadlessToken = existing.HeadlessToken
 			if key != a.UUID {
 				delete(v, key)
@@ -386,6 +440,9 @@ func switchTo(v Vault, uuid string) error {
 	target, ok := v[uuid]
 	if !ok {
 		return fmt.Errorf("no stored account with uuid %s", uuid)
+	}
+	if target.kind() == kindCodex {
+		return fmt.Errorf("%s is a ChatGPT account; Claude Code cannot log into it", target.Email)
 	}
 	if target.OAuth.AccessToken == "" {
 		return fmt.Errorf("%s has a headless token only; Claude Code's own login needs a full-scope token, so run `claude auth login` and capture it", target.Email)
@@ -444,6 +501,9 @@ func forget(v Vault, uuid string) error {
 // usageFor fetches usage for one account, refreshing parked tokens as needed. The active account
 // is never refreshed here — Claude Code owns those tokens and rotation could log the user out.
 func usageFor(v Vault, a *Account, isActive bool) (Usage, error) {
+	if a.kind() == kindCodex {
+		return codexUsageFor(a)
+	}
 	if a.OAuth.AccessToken == "" {
 		return Usage{}, errHeadlessOnly
 	}

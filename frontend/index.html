@@ -73,7 +73,11 @@
   .acct .sub { color: var(--phosphor-dim); font-size: 10px; font-variant-numeric: tabular-nums; }
   .acct .nums { color: var(--phosphor-dim); font-variant-numeric: tabular-nums; flex: none; align-self: flex-start; }
   .acct .badge { color: var(--warning); font-size: 10px; flex: none; align-self: flex-start; }
-  .acct.active { cursor: default; }
+  .acct.active, .acct.codex { cursor: default; }
+  .acct.codex:hover { border-color: transparent; background: none; }
+  /* Hidden rather than removed: a ChatGPT account is never "active", but the rows stay aligned. */
+  .acct.codex .dot { visibility: hidden; }
+  .accounts h2:not(:first-child) { margin-top: 10px; }
   .acct .kill {
     flex: none; align-self: flex-start; width: 14px; text-align: center; line-height: 1;
     color: var(--phosphor-dim); opacity: 0; cursor: pointer; font-size: 13px;
@@ -190,29 +194,41 @@ function render() {
       ? gauge('Session · 5h', u.session) + gauge('Weekly · 7d', u.weekly) + (u.scoped ? gauge(u.scoped.label + ' · 7d', u.scoped) : '')
       : `<div class="empty">${active && active.error ? esc(active.error) : 'waiting for usage…'}</div>`;
 
-  el('accounts').innerHTML = '<h2>Accounts</h2>' + accounts.map(a => {
-    const nums = a.usage ? `${a.usage.session.percent.toFixed(0)}% · ${a.usage.weekly.percent.toFixed(0)}%` : '—';
+  const row = a => {
+    const codex = a.kind === 'codex';
+    // A window the account does not have (ChatGPT plans report no session one) is left out
+    // instead of shown as a healthy 0%.
+    const live = a.usage ? [a.usage.session, a.usage.weekly].filter(g => g && (g.percent > 0 || g.resetsAt)) : [];
+    const nums = !a.usage ? '—'
+      : live.length ? live.map(g => `${g.percent.toFixed(0)}%`).join(' · ')
+      : '0%';
     const right = a.needsReauth ? `<span class="badge">needs login</span>`
       : a.benchedUntil ? `<span class="badge" title="${esc(a.benchReason)}">benched ${countdown(a.benchedUntil)}</span>`
       : `<span class="nums">${nums}</span>`;
     const turns = a.turns ? ` · ${a.turns} turn${a.turns === 1 ? '' : 's'}/1h` : '';
-    const resets = a.usage
-      ? `<span data-reset="${a.usage.session.resetsAt || ''}">${countdown(a.usage.session.resetsAt)}</span>`
-        + ` · <span data-reset="${a.usage.weekly.resetsAt || ''}">${countdown(a.usage.weekly.resetsAt)}</span>`
-      : '';
-    const sub = a.needsReauth ? 'run claude auth login'
-      : !a.hasLogin ? 'headless token only' + turns
+    const resets = live.filter(g => g.resetsAt)
+      .map(g => `<span data-reset="${g.resetsAt}">${countdown(g.resetsAt)}</span>`).join(' · ');
+    const sub = a.needsReauth ? (codex ? 'run vibemon codex add' : 'run claude auth login')
+      : !a.hasLogin ? (codex ? 'not logged in' : 'headless token only') + turns
       : (resets ? 'resets ' + resets : '') + turns;
     const title = [a.plan, a.orgName].filter(Boolean).join(' — ');
-    return `<div class="acct ${a.active ? 'active' : ''}" data-uuid="${esc(a.uuid)}" title="${esc(title)}">
+    return `<div class="acct ${a.active ? 'active' : ''} ${codex ? 'codex' : ''}" data-uuid="${esc(a.uuid)}" data-kind="${esc(a.kind || 'claude')}" title="${esc(title)}">
       <span class="dot"></span>
       <span class="who"><span class="mail">${a.preferred ? '★ ' : ''}${esc(a.email)}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</span>
       ${right}
       <span class="kill" data-kill="${esc(a.uuid)}" title="Forget this account">×</span>
     </div>`;
-  }).join('');
+  };
 
-  el('accounts').querySelectorAll('.acct:not(.active)').forEach(node => {
+  // One list while every account is a Claude one; two labelled groups as soon as Codex joins.
+  const codexAccounts = accounts.filter(a => a.kind === 'codex');
+  const claudeAccounts = accounts.filter(a => a.kind !== 'codex');
+  el('accounts').innerHTML = codexAccounts.length
+    ? '<h2>Claude</h2>' + claudeAccounts.map(row).join('') + '<h2>Codex</h2>' + codexAccounts.map(row).join('')
+    : '<h2>Accounts</h2>' + claudeAccounts.map(row).join('');
+
+  // Switching is a Claude idea: codex reads its account's home per run, there is no active one.
+  el('accounts').querySelectorAll('.acct:not(.active):not(.codex)').forEach(node => {
     node.onclick = () => send('panel:switch', node.dataset.uuid);
   });
   el('accounts').querySelectorAll('.kill').forEach(node => {

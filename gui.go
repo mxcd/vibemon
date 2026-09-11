@@ -38,6 +38,7 @@ const (
 
 type panelAccount struct {
 	UUID        string `json:"uuid"`
+	Kind        string `json:"kind"`
 	Email       string `json:"email"`
 	Label       string `json:"label"`
 	OrgName     string `json:"orgName,omitempty"`
@@ -57,11 +58,12 @@ type panelAccount struct {
 }
 
 type panelState struct {
-	Accounts  []panelAccount  `json:"accounts"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	Notice    string          `json:"notice,omitempty"`
-	Order     []string        `json:"order"`
-	Projects  []projectPolicy `json:"projects"`
+	Accounts   []panelAccount  `json:"accounts"`
+	UpdatedAt  time.Time       `json:"updatedAt"`
+	Notice     string          `json:"notice,omitempty"`
+	Order      []string        `json:"order"`
+	CodexOrder []string        `json:"codexOrder"`
+	Projects   []projectPolicy `json:"projects"`
 }
 
 // density controls how much of the usage picture the menu bar itself carries.
@@ -96,6 +98,7 @@ type monitor struct {
 	autoSwitch     bool
 	preferred      string
 	order          []string
+	codexOrder     []string
 	projects       []projectPolicy
 	settings       *application.WebviewWindow
 	lastAutoSwitch time.Time
@@ -147,10 +150,14 @@ func (m *monitor) benched(uuid string) (backoffState, bool) {
 	return s, true
 }
 
-// prefs snapshots the preferences that live on the monitor. Caller must hold m.mu.
+// prefs lays the preferences the monitor owns over whatever is on disk right now. The account
+// orders and project policies are written by the CLI too (`vibemon codex add` appends to the Codex
+// one), so saving an in-memory copy from a tray toggle would quietly undo them.
+// Caller must hold m.mu.
 func (m *monitor) prefs() prefs {
-	return prefs{Density: m.density, AutoSwitch: m.autoSwitch, Preferred: m.preferred,
-		Order: m.order, Projects: m.projects}
+	p := loadPrefs()
+	p.Density, p.AutoSwitch, p.Preferred = m.density, m.autoSwitch, m.preferred
+	return p
 }
 
 func runGUI() error {
@@ -161,7 +168,7 @@ func runGUI() error {
 
 	saved := loadPrefs()
 	m := &monitor{density: saved.Density, autoSwitch: saved.AutoSwitch, preferred: saved.Preferred,
-		order: saved.Order, projects: saved.Projects}
+		order: saved.Order, codexOrder: saved.CodexOrder, projects: saved.Projects}
 	m.app = application.New(application.Options{
 		Name:        "vibemon",
 		Description: "Claude Code usage monitor",
@@ -289,6 +296,9 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 		return false
 	}
 	m.vault = v
+	// The CLI writes these while the app runs; the panel and the settings window show them.
+	saved := loadPrefs()
+	m.order, m.codexOrder, m.projects = saved.Order, saved.CodexOrder, saved.Projects
 	if len(v) == 0 {
 		m.state = panelState{Notice: "No accounts yet — log in with Claude Code, then Capture.", UpdatedAt: time.Now()}
 		m.publish()
@@ -312,17 +322,24 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	for _, a := range v.sorted() {
 		isActive := a.UUID == active
 		pa := panelAccount{
-			UUID: a.UUID, Email: a.Email, Label: a.Label, OrgName: a.OrgName,
+			UUID: a.UUID, Kind: a.kind(), Email: a.Email, Label: a.Label, OrgName: a.OrgName,
 			Plan: a.planLabel(), Active: isActive, NeedsReauth: a.NeedsReauth,
 			Preferred: a.UUID == m.preferred,
 			HasToken:  a.HeadlessToken != "", HasLogin: a.OAuth.AccessToken != "",
 			Turns: fleet.turnsLastHour(a.UUID),
+		}
+		if a.kind() == kindCodex {
+			// A Codex account has one thing instead of a login and a token: its home.
+			pa.HasLogin = codexLoggedIn(codexHome(a.Email))
+			pa.HasToken = pa.HasLogin
 		}
 		if b, ok := fleet.benched(a.UUID); ok {
 			until := b.Until
 			pa.BenchedUntil, pa.BenchReason = &until, b.Reason
 		}
 		switch state, waiting := m.benched(a.UUID); {
+		case !pa.HasLogin && a.kind() == kindCodex:
+			pa.Error = "not logged in: vibemon codex add " + a.Email
 		case !pa.HasLogin:
 			pa.Error = "headless token only, no usage"
 		case waiting:
@@ -330,7 +347,9 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 			pa.Usage = previous[a.UUID]
 			pa.Error = fmt.Sprintf("%s — retrying in %s", state.reason,
 				time.Until(state.until).Round(time.Second))
-		case isActive || includeParked:
+		// A Codex poll is a plain GET that refreshes nothing, and these numbers drive the rotation
+		// of every headless review, so they are refreshed on every tick rather than the parked one.
+		case isActive || includeParked || a.kind() == kindCodex:
 			u, err := usageFor(v, a, isActive)
 			if err != nil {
 				wait := m.penalise(a.UUID, err)
@@ -350,7 +369,8 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	}
 	cacheUsage(polled)
 
-	m.state = panelState{Accounts: accounts, UpdatedAt: time.Now(), Order: m.order, Projects: m.projects}
+	m.state = panelState{Accounts: accounts, UpdatedAt: time.Now(), Order: m.order,
+		CodexOrder: m.codexOrder, Projects: m.projects}
 	if err := saveVault(v); err != nil {
 		m.state.Notice = "vault save failed: " + err.Error()
 	}
@@ -389,7 +409,7 @@ func (m *monitor) autoRotate() bool {
 	// before considering anything else.
 	if m.roamed && m.preferred != "" && active.UUID != m.preferred {
 		for _, a := range m.state.Accounts {
-			if a.UUID != m.preferred || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
+			if a.UUID != m.preferred || a.Kind == kindCodex || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
 				continue
 			}
 			if worstOf(a.Usage) < autoSwitchHeadroom {
@@ -412,8 +432,8 @@ func (m *monitor) autoRotate() bool {
 	best, bestScore := "", autoSwitchHeadroom
 	for _, a := range m.state.Accounts {
 		// An account a headless runner just drove into a limit is not a refuge, whatever its
-		// last polled numbers say.
-		if a.Active || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
+		// last polled numbers say. Claude Code cannot log into a ChatGPT account at all.
+		if a.Active || a.Kind == kindCodex || a.NeedsReauth || a.Usage == nil || a.BenchedUntil != nil {
 			continue
 		}
 		score := worstOf(a.Usage)
@@ -539,14 +559,20 @@ func (m *monitor) confirmRemove(uuid string) {
 		m.mu.Unlock()
 		return
 	}
-	email := target.Email
+	email, isCodex := target.Email, target.kind() == kindCodex
 	m.mu.Unlock()
 
+	message := fmt.Sprintf(
+		"Forget %s?\n\nvibemon stops tracking it. Claude Code stays signed in as whoever it is signed in as now; "+
+			"to use this account again you will need to run `claude auth login` and capture it.", email)
+	if isCodex {
+		message = fmt.Sprintf(
+			"Forget %s?\n\nvibemon stops tracking it. The login stays in %s; delete that directory to log the account out.",
+			email, codexHome(email))
+	}
 	dialog := m.app.Dialog.Question()
 	dialog.SetTitle("Remove account")
-	dialog.SetMessage(fmt.Sprintf(
-		"Forget %s?\n\nvibemon stops tracking it. Claude Code stays signed in as whoever it is signed in as now; "+
-			"to use this account again you will need to run `claude auth login` and capture it.", email))
+	dialog.SetMessage(message)
 	cancel := dialog.AddButton("Cancel")
 	cancel.SetAsCancel()
 	remove := dialog.AddButton("Remove")
@@ -653,7 +679,12 @@ func (m *monitor) setDensity(d density) {
 // buildMenu is the right-click menu; the left click opens the panel instead. Caller must hold m.mu.
 func (m *monitor) buildMenu() *application.Menu {
 	menu := m.app.Menu.New()
+	switchable := 0
 	for _, a := range m.state.Accounts {
+		if a.Kind == kindCodex {
+			continue // there is nothing to switch to: codex picks its account per run
+		}
+		switchable++
 		label := a.Email
 		if a.NeedsReauth {
 			label += "  ⚠ needs login"
@@ -662,7 +693,7 @@ func (m *monitor) buildMenu() *application.Menu {
 		item := menu.AddCheckbox(label, a.Active)
 		item.OnClick(func(*application.Context) { go m.switchTo(uuid) })
 	}
-	if len(m.state.Accounts) > 0 {
+	if switchable > 0 {
 		menu.AddSeparator()
 	}
 	display := menu.AddSubmenu("Menu bar display")
@@ -672,13 +703,16 @@ func (m *monitor) buildMenu() *application.Menu {
 			OnClick(func(*application.Context) { go m.setDensity(value) })
 	}
 
-	if len(m.state.Accounts) > 1 {
+	if switchable > 1 {
 		menu.AddCheckbox("Auto-switch when exhausted", m.autoSwitch).
 			OnClick(func(*application.Context) { go m.setAutoSwitch(!m.autoSwitch) })
 		preferred := menu.AddSubmenu("Preferred account")
 		preferred.AddRadio("None", m.preferred == "").
 			OnClick(func(*application.Context) { go m.setPreferred("") })
 		for _, a := range m.state.Accounts {
+			if a.Kind == kindCodex {
+				continue
+			}
 			uuid, email := a.UUID, a.Email
 			preferred.AddRadio(email, uuid == m.preferred).
 				OnClick(func(*application.Context) { go m.setPreferred(uuid) })
@@ -708,17 +742,19 @@ func (m *monitor) setPolicy(data any) {
 		return
 	}
 	var in struct {
-		Order    []string        `json:"order"`
-		Projects []projectPolicy `json:"projects"`
+		Order      []string        `json:"order"`
+		CodexOrder []string        `json:"codexOrder"`
+		Projects   []projectPolicy `json:"projects"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		m.notify("settings: " + err.Error())
 		return
 	}
 	m.mu.Lock()
-	m.order, m.projects = in.Order, in.Projects
-	m.state.Order, m.state.Projects = in.Order, in.Projects
+	m.order, m.codexOrder, m.projects = in.Order, in.CodexOrder, in.Projects
+	m.state.Order, m.state.CodexOrder, m.state.Projects = in.Order, in.CodexOrder, in.Projects
 	p := m.prefs()
+	p.Order, p.CodexOrder, p.Projects = in.Order, in.CodexOrder, in.Projects
 	m.mu.Unlock()
 	if err := savePrefs(p); err != nil {
 		m.notify("could not save settings: " + err.Error())

@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -31,10 +33,10 @@ func main() {
 		err = cmdSwitch(os.Args[2])
 	case "remove", "forget":
 		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: vibemon remove <email>")
+			err = fmt.Errorf("usage: vibemon remove [--kind claude|codex] <email>")
 			break
 		}
-		err = cmdRemove(os.Args[2])
+		err = cmdRemove(os.Args[2:])
 	case "usage":
 		err = cmdUsage()
 	case "add-token":
@@ -49,6 +51,12 @@ func main() {
 			break
 		}
 		err = cmdToken(os.Args[2])
+	case "codex":
+		if len(os.Args) < 3 || os.Args[2] != "add" {
+			err = fmt.Errorf("usage: vibemon codex add [<email>]")
+			break
+		}
+		err = cmdCodexAdd(os.Args[3:])
 	case "pick":
 		err = cmdPick(os.Args[2:])
 	case "exec":
@@ -71,16 +79,21 @@ func usageText() {
   vibemon capture         store the account Claude Code is currently logged into
   vibemon list             list stored accounts (* marks the active one)
   vibemon switch <email>   make an account active for the next Claude Code start
-  vibemon remove <email>   forget an account (does not log Claude Code out)
+  vibemon remove [--kind claude|codex] <email>
+                           forget an account (does not log Claude Code or codex out)
   vibemon usage            show usage for every stored account
 
   vibemon add-token <email> [token]   store a 'claude setup-token' token for headless runs
   vibemon token <email>               print an account's headless token (for scripts)
-  vibemon pick [--workdir d] [--model m] [--json]
+  vibemon codex add [<email>]         track a ChatGPT account: adopts an existing
+                                      ~/.vibemon/codex/<email>, else runs 'codex login' there
+  vibemon pick [--kind claude|codex|all] [--workdir d] [--model m] [--json]
                            show which account exec would use there, and why the others are skipped
   vibemon exec [flags] [--] [claude args...]
                            run claude under the project's first available account; with -p,
-                           resume under the next account when a limit hits (vibemon exec --help)`)
+                           resume under the next account when a limit hits (vibemon exec --help)
+  vibemon exec --kind codex [flags] [--] codex exec ...
+                           the same for a ChatGPT account, under its own CODEX_HOME`)
 }
 
 func cmdCapture() error {
@@ -102,6 +115,7 @@ func cmdList() error {
 		return nil
 	}
 	active := activeUUID(v)
+	kind := ""
 	for _, a := range v.sorted() {
 		marker := " "
 		if a.UUID == active {
@@ -111,46 +125,141 @@ func cmdList() error {
 		if a.NeedsReauth {
 			flag = "  [needs re-auth]"
 		}
-		if a.HeadlessToken != "" {
-			flag += "  [token]"
+		if a.kind() == kindCodex {
+			if !codexLoggedIn(codexHome(a.Email)) {
+				flag += "  [not logged in]"
+			}
+		} else {
+			if a.HeadlessToken != "" {
+				flag += "  [token]"
+			}
+			if a.OAuth.AccessToken == "" {
+				flag += "  [no login captured]"
+			}
 		}
-		if a.OAuth.AccessToken == "" {
-			flag += "  [no login captured]"
+		if kind != "" && kind != a.kind() {
+			fmt.Println() // a blank line between the two groups
 		}
+		kind = a.kind()
 		fmt.Printf("%s %-34s %-22s %s%s\n", marker, a.Email, a.planLabel(), a.OrgName, flag)
 	}
 	return nil
 }
 
-// findByEmail resolves the user-facing identifier used by every command that takes one.
-func findByEmail(v Vault, email string) (*Account, error) {
-	for _, a := range v {
-		if strings.EqualFold(a.Email, email) {
-			return a, nil
-		}
+func cmdRemove(args []string) error {
+	kind := ""
+	if len(args) > 1 && args[0] == "--kind" {
+		kind, args = args[1], args[2:]
 	}
-	return nil, fmt.Errorf("no stored account matching %q — run `vibemon list`", email)
-}
-
-func cmdRemove(email string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: vibemon remove [--kind claude|codex] <email>")
+	}
 	unlock := lockVault()
 	defer unlock()
 	v, err := loadVault()
 	if err != nil {
 		return err
 	}
-	target, err := findByEmail(v, email)
+	target, err := findByEmail(v, kind, args[0])
 	if err != nil {
 		return err
 	}
-	wasActive := target.UUID == activeUUID(v)
+	wasActive := target.kind() == kindClaude && target.UUID == activeUUID(v)
+	isCodex, home := target.kind() == kindCodex, codexHome(target.Email)
 	if err := forget(v, target.UUID); err != nil {
 		return err
 	}
 	fmt.Printf("removed %s from vibemon\n", target.Email)
-	if wasActive {
+	switch {
+	case wasActive:
 		fmt.Println("note: Claude Code is still signed in as this account — vibemon just stopped tracking it")
+	case isCodex:
+		fmt.Printf("note: the login is kept at %s; delete that directory to log the account out\n", home)
 	}
+	return nil
+}
+
+// cmdCodexAdd tracks a ChatGPT account. With an email it adopts an existing home when that home is
+// already logged in (both of MaPa's were set up by hand), and only falls back to a browser login
+// when there is none. Bare, it logs a new account in and names the home after the email the usage
+// endpoint reports, because typing the email is how the wrong one gets registered.
+func cmdCodexAdd(args []string) error {
+	email := ""
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return fmt.Errorf("usage: vibemon codex add [<email>]")
+		}
+		if email != "" {
+			return fmt.Errorf("one email at a time")
+		}
+		email = a
+	}
+	if email != "" {
+		if err := codexEmailOK(email); err != nil {
+			return err
+		}
+	}
+	// Where the login is prepared: the account's own home when an email was given, a temporary
+	// directory otherwise, because the name only exists once the endpoint has answered. Nothing
+	// here holds the vault lock: `codex login` waits for a browser, and the menu bar app takes that
+	// same lock on every tick.
+	home, temporary := codexHome(email), false
+	if email == "" {
+		home, temporary = filepath.Join(codexHomesDir(), fmt.Sprintf(".login-%d", os.Getpid())), true
+	}
+	// A login that never got filed is removed rather than left as an orphan no command can find.
+	defer func() {
+		if !temporary {
+			return
+		}
+		if codexLoggedIn(home) {
+			fmt.Fprintf(os.Stderr, "vibemon: the login in %s was never filed and has been discarded; run `vibemon codex add` again\n", home)
+		}
+		os.RemoveAll(home)
+	}()
+
+	if _, err := fetchCodexUsage(home); err != nil {
+		if !errors.Is(err, errNeedsReauth) {
+			return err // a throttle or a server fault: try again later, do not log in over it
+		}
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			return err
+		}
+		linkConfig(home)
+		if err := codexLogin(home); err != nil {
+			return err
+		}
+	}
+
+	r, err := fetchCodexUsage(home)
+	if err != nil {
+		return err
+	}
+	dest, err := placeCodexHome(home, temporary, r.Email, email)
+	if err != nil {
+		return err
+	}
+	if dest != home {
+		if err := os.Rename(home, dest); err != nil {
+			return err
+		}
+		fmt.Printf("logged in as %s; its home is %s\n", r.Email, dest)
+		home, temporary = dest, false
+	}
+
+	unlock := lockVault()
+	defer unlock()
+	v, err := loadVault()
+	if err != nil {
+		return err
+	}
+	a, u, err := registerCodex(v, home)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("added %s (%s)  session %.0f%%  weekly %.0f%% (%s)\n",
+		a.Email, a.planLabel(), u.Session.Percent, u.Weekly.Percent, until(u.Weekly.ResetsAt))
+	cacheUsage(map[string]Usage{a.UUID: u})
 	return nil
 }
 
@@ -161,7 +270,7 @@ func cmdSwitch(email string) error {
 	if err != nil {
 		return err
 	}
-	target, err := findByEmail(v, email)
+	target, err := findByEmail(v, kindClaude, email)
 	if err != nil {
 		return err
 	}
@@ -208,6 +317,9 @@ func cmdUsage() error {
 			marker, a.Email, u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 		if u.Scoped != nil {
 			line += fmt.Sprintf("   %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
+		}
+		for _, g := range u.Extra {
+			line += fmt.Sprintf("   %s %3.0f%%", g.Label, g.Percent)
 		}
 		fmt.Println(line)
 	}
@@ -279,7 +391,7 @@ func cmdToken(email string) error {
 	if err != nil {
 		return err
 	}
-	a, err := findByEmail(v, email)
+	a, err := findByEmail(v, kindClaude, email)
 	if err != nil {
 		return err
 	}
@@ -299,10 +411,26 @@ func cmdPick(args []string) error {
 	if err != nil {
 		return err
 	}
+	kinds := []string{o.Kind}
+	if o.Kind == "" || o.Kind == kindAll {
+		kinds = []string{kindClaude, kindCodex}
+	}
 	st := readFleet()
-	runnable, skipped, project := rank(v, loadPrefs(), &st, o.pickOptions)
+	p := loadPrefs()
+	var runnable, skipped []candidate
+	var project *projectPolicy
+	for _, kind := range kinds {
+		opts := o.pickOptions
+		opts.Kind = kind
+		run, skip, proj := rank(v, p, &st, opts)
+		runnable, skipped = append(runnable, run...), append(skipped, skip...)
+		if proj != nil {
+			project = proj
+		}
+	}
 	if o.JSON {
 		type row struct {
+			Kind   string    `json:"kind"`
 			Email  string    `json:"email"`
 			Usage  *Usage    `json:"usage,omitempty"`
 			Reason string    `json:"reason,omitempty"`
@@ -310,10 +438,10 @@ func cmdPick(args []string) error {
 		}
 		out := map[string]any{"runnable": []row{}, "skipped": []row{}}
 		for _, c := range runnable {
-			out["runnable"] = append(out["runnable"].([]row), row{Email: c.Account.Email, Usage: c.Usage})
+			out["runnable"] = append(out["runnable"].([]row), row{Kind: c.Account.kind(), Email: c.Account.Email, Usage: c.Usage})
 		}
 		for _, c := range skipped {
-			out["skipped"] = append(out["skipped"].([]row), row{Email: c.Account.Email, Usage: c.Usage, Reason: c.Reason, Until: c.Until})
+			out["skipped"] = append(out["skipped"].([]row), row{Kind: c.Account.kind(), Email: c.Account.Email, Usage: c.Usage, Reason: c.Reason, Until: c.Until})
 		}
 		if project != nil {
 			out["project"] = project.Path
@@ -323,15 +451,17 @@ func cmdPick(args []string) error {
 	if project != nil {
 		fmt.Printf("project %s\n", project.Path)
 	}
-	for i, c := range runnable {
+	// One ">" per kind: each kind picks its own first runnable account.
+	firstOf := map[string]bool{}
+	for _, c := range runnable {
 		marker := " "
-		if i == 0 {
-			marker = ">"
+		if !firstOf[c.Account.kind()] {
+			marker, firstOf[c.Account.kind()] = ">", true
 		}
-		fmt.Printf("%s %-34s %s\n", marker, c.Account.Email, usageNote(c.Usage))
+		fmt.Printf("%s %-7s %-34s %s\n", marker, c.Account.kind(), c.Account.Email, usageNote(c.Usage))
 	}
 	for _, c := range skipped {
-		fmt.Printf("  %-34s skipped: %s%s\n", c.Account.Email, c.Reason, untilNote(c.Until))
+		fmt.Printf("  %-7s %-34s skipped: %s%s\n", c.Account.kind(), c.Account.Email, c.Reason, untilNote(c.Until))
 	}
 	if len(runnable) == 0 {
 		return fmt.Errorf("no account has headroom")
@@ -346,6 +476,9 @@ func usageNote(u *Usage) string {
 	s := fmt.Sprintf("session %3.0f%% (%s)  weekly %3.0f%% (%s)", u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 	if u.Scoped != nil {
 		s += fmt.Sprintf("  %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
+	}
+	for _, g := range u.Extra {
+		s += fmt.Sprintf("  %s %3.0f%%", g.Label, g.Percent)
 	}
 	return s + "  as of " + u.FetchedAt.Local().Format("15:04")
 }

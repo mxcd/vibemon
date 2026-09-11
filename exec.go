@@ -45,7 +45,7 @@ type execOptions struct {
 // is optional.
 var wrapperFlags = map[string]bool{
 	"session": true, "workdir": true, "model": true, "account": true, "exclude": true,
-	"ceiling": true, "fallback": true, "wait": false, "json": false,
+	"ceiling": true, "fallback": true, "kind": true, "wait": false, "json": false,
 }
 
 func splitWrapperArgs(args []string) (ours, rest []string) {
@@ -74,6 +74,7 @@ func parseExecArgs(args []string) (execOptions, error) {
 	ours, rest := splitWrapperArgs(args)
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.Kind, "kind", "", "account kind: claude or codex (pick also takes all)")
 	fs.StringVar(&o.Session, "session", "", "session id to create or resume")
 	fs.StringVar(&o.Dir, "workdir", "", "run in this directory (default: current)")
 	fs.StringVar(&o.Model, "model", "", "model to run; per-model caps fall back down the list")
@@ -91,8 +92,23 @@ func parseExecArgs(args []string) (execOptions, error) {
 	}
 	o.Fallback = strings.Split(strings.ToLower(fallback), ",")
 	o.Command = rest
+	switch o.Kind {
+	case "", kindClaude, kindCodex, kindAll:
+	default:
+		return o, fmt.Errorf("unknown --kind %q: claude, codex or all", o.Kind)
+	}
+	if o.Kind == kindCodex {
+		// codex takes its model as -m inside its own argv and keeps rollouts per CODEX_HOME, so
+		// neither flag has anything to act on here; silently ignoring them would mislead.
+		if o.Model != "" {
+			return o, fmt.Errorf("--model does not apply to --kind codex: pass -m to codex itself")
+		}
+		if o.Session != "" {
+			return o, fmt.Errorf("--session does not apply to --kind codex: a review is one turn, nothing resumes")
+		}
+	}
 	if len(o.Command) == 0 || strings.HasPrefix(o.Command[0], "-") {
-		o.Command = append([]string{"claude"}, o.Command...)
+		o.Command = append([]string{defaultCommand(o.Kind)}, o.Command...)
 	}
 	if o.Dir == "" {
 		o.Dir, _ = os.Getwd()
@@ -100,9 +116,18 @@ func parseExecArgs(args []string) (execOptions, error) {
 	return o, nil
 }
 
+// defaultCommand is what exec runs when the caller gave only flags.
+func defaultCommand(kind string) string {
+	if kind == kindCodex {
+		return "codex"
+	}
+	return "claude"
+}
+
 func execUsage() string {
 	return `usage: vibemon exec [flags] [--] [claude args...]
 
+  --kind claude|codex account kind to run under (claude)
   --session <uuid>   session id to create (or resume, on a limit); default: fresh
   --workdir <dir>    run there; also picks the project policy (default: cwd)
   --model <name>     model to run; a per-model cap falls back down --fallback
@@ -115,7 +140,11 @@ func execUsage() string {
 
 Without a command, runs an interactive "claude" under the project's first available account.
 With "-p", buffers the output, resumes the session under the next account on a limit, and
-exits 0 done, 1 failed, 2 no account has headroom, 3 context exhausted.`
+exits 0 done, 1 failed, 2 no account has headroom, 3 context exhausted.
+
+With --kind codex, runs codex under the ChatGPT account with the most headroom, with that
+account's CODEX_HOME set. "codex exec" is the headless form; on a limit the whole command
+reruns under the next account, because a review is one turn and nothing resumes.`
 }
 
 type attempt struct {
@@ -139,14 +168,29 @@ func cmdExec(args []string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
+	if o.Kind == kindAll {
+		fmt.Fprintln(os.Stderr, "error: exec runs one kind: --kind claude or --kind codex")
+		return 1
+	}
+	if o.Kind == "" {
+		o.Kind = kindClaude
+	}
 	p := loadPrefs()
-	if isHeadless(o.Command) {
+	if isHeadless(o.Kind, o.Command) {
 		return runHeadless(v, p, o)
 	}
 	return runInteractive(v, p, o)
 }
 
-func isHeadless(cmd []string) bool {
+// isHeadless tells a turn that can be retried elsewhere from an interactive session. For codex that
+// is the "exec" subcommand; its -p is --profile, not --print.
+//
+// ponytail: a Codex prompt that is the single word "exec" would be misread as the subcommand.
+// Upgrade path: walk the argv properly instead of asking whether the word is in it.
+func isHeadless(kind string, cmd []string) bool {
+	if kind == kindCodex {
+		return len(cmd) > 1 && slices.Contains(cmd[1:], "exec")
+	}
 	return slices.Contains(cmd, "-p") || slices.Contains(cmd, "--print")
 }
 
@@ -162,16 +206,35 @@ var claudeValueFlags = map[string]bool{
 	"--permission-prompt-tool": true, "--max-budget-usd": true, "--effort": true, "--betas": true,
 }
 
-func hasPositionalPrompt(cmd []string) bool {
+// codexValueFlags is the same table for codex. -o and -p above all: reading "-o out.md" as a prompt
+// would skip the piped one.
+var codexValueFlags = map[string]bool{
+	"-m": true, "--model": true, "-c": true, "--config": true, "-s": true, "--sandbox": true,
+	"-p": true, "--profile": true, "-o": true, "--output-last-message": true, "-C": true, "--cd": true,
+	"-i": true, "--image": true, "--add-dir": true, "--output-schema": true, "--enable": true,
+	"--disable": true, "--local-provider": true, "--thread-source": true, "--color": true,
+}
+
+// codexSubcommands are the words between "codex" and its prompt; they are not the prompt.
+var codexSubcommands = map[string]bool{"exec": true, "resume": true, "fork": true, "review": true}
+
+func hasPositionalPrompt(kind string, cmd []string) bool {
+	valueFlags, skip := claudeValueFlags, map[string]bool(nil)
+	if kind == kindCodex {
+		valueFlags, skip = codexValueFlags, codexSubcommands
+	}
 	for i := 1; i < len(cmd); i++ {
 		a := cmd[i]
 		if a == "--" {
 			return i+1 < len(cmd)
 		}
 		if strings.HasPrefix(a, "-") {
-			if claudeValueFlags[a] {
+			if valueFlags[a] {
 				i++
 			}
+			continue
+		}
+		if skip[a] {
 			continue
 		}
 		return true
@@ -211,12 +274,12 @@ func runInteractive(v Vault, p prefs, o execOptions) int {
 	c := runnable[0]
 	fmt.Fprintf(os.Stderr, "vibemon: %s%s\n", c.Account.Email, projectNote(project))
 	argv := o.Command
-	if o.Model != "" && flagValue(argv, "--model") == "" {
+	if c.Account.kind() == kindClaude && o.Model != "" && flagValue(argv, "--model") == "" {
 		argv = append(slices.Clone(argv), "--model", o.Model)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = o.Dir
-	cmd.Env = childEnv(c.Account.HeadlessToken)
+	cmd.Env = c.Account.childEnv()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err, _ := runChild(cmd)
 	recordTurn(c.Account, o.Model, "interactive", nil, o.Dir)
@@ -228,7 +291,7 @@ func runHeadless(v Vault, p prefs, o execOptions) int {
 	// command carries no prompt of its own: draining an inherited pipe would eat a driver loop's
 	// remaining lines, or block forever on one that never closes. Read before taking any lock.
 	var stdin []byte
-	if !hasPositionalPrompt(o.Command) {
+	if !hasPositionalPrompt(o.Kind, o.Command) {
 		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
 			stdin, _ = io.ReadAll(os.Stdin)
 		}
@@ -241,22 +304,28 @@ func runHeadless(v Vault, p prefs, o execOptions) int {
 	}
 	defer release()
 
-	sid, resume := sessionFromArgs(o.Command)
-	if o.Session != "" {
-		sid = o.Session
+	// A Codex turn owns no session: rollouts live inside the account's own CODEX_HOME, so a retry
+	// under the next account reruns the whole command rather than resuming anything.
+	var sid string
+	var resume bool
+	if o.Kind != kindCodex {
+		sid, resume = sessionFromArgs(o.Command)
+		if o.Session != "" {
+			sid = o.Session
+		}
+		if sid == "" {
+			sid = newUUID()
+		}
+		release2, err := acquireLock(sessionLockName(sid))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		defer release2()
 	}
-	if sid == "" {
-		sid = newUUID()
-	}
-	release2, err := acquireLock(sessionLockName(sid))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
-	}
-	defer release2()
 
 	model := o.Model
-	if model == "" {
+	if model == "" && o.Kind != kindCodex {
 		model = flagValue(o.Command, "--model")
 	}
 	var attempts []attempt
@@ -272,7 +341,7 @@ func runHeadless(v Vault, p prefs, o execOptions) int {
 				st.Bench[k] = b
 			}
 		}
-		runnable, skipped, project := rank(v, p, &st, pickOptions{Dir: o.Dir, Model: model, Only: o.Only, Exclude: o.Exclude, Ceiling: o.Ceiling})
+		runnable, skipped, project := rank(v, p, &st, pickOptions{Dir: o.Dir, Kind: o.Kind, Model: model, Only: o.Only, Exclude: o.Exclude, Ceiling: o.Ceiling})
 		if len(runnable) == 0 {
 			if until, ok := earliestReturn(skipped); ok && o.Wait && until.After(time.Now()) {
 				fmt.Fprintf(os.Stderr, "vibemon: no account has headroom, sleeping until %s\n", until.Local().Format("02.01.2006 15:04:05"))
@@ -282,13 +351,16 @@ func runHeadless(v Vault, p prefs, o execOptions) int {
 			return reportNoHeadroom(skipped, o, sid, attempts, lastOut)
 		}
 		c := runnable[0]
-		argv := buildArgs(o.Command, sid, resume, model)
+		argv := o.Command
+		if c.Account.kind() == kindClaude {
+			argv = buildArgs(o.Command, sid, resume, model)
+		}
 		fmt.Fprintf(os.Stderr, "vibemon: attempt %d as %s%s%s\n", len(attempts)+1, c.Account.Email,
 			modelNote(model), projectNote(project))
 
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Dir = o.Dir
-		cmd.Env = childEnv(c.Account.HeadlessToken)
+		cmd.Env = c.Account.childEnv()
 		if len(stdin) > 0 {
 			cmd.Stdin = bytes.NewReader(stdin) // nil means /dev/null: the CLI waits 3 s on an empty pipe
 		}
@@ -328,7 +400,11 @@ func runHeadless(v Vault, p prefs, o execOptions) int {
 				model = next
 			}
 		case outAuth:
-			bench(time.Now().Add(24*time.Hour), "token rejected: replace with vibemon add-token")
+			reason := "token rejected: replace with vibemon add-token"
+			if c.Account.kind() == kindCodex {
+				reason = "login rejected: vibemon codex add " + c.Account.Email
+			}
+			bench(time.Now().Add(24*time.Hour), reason)
 		case outNoSession:
 			newSessions++
 			if newSessions > 2 {
@@ -373,7 +449,8 @@ func emit(o execOptions, email, model, sid string, attempts []attempt, out strin
 	}
 	enc := json.NewEncoder(os.Stdout)
 	_ = enc.Encode(map[string]any{
-		"account": email, "model": model, "session": sid, "attempts": attempts, "result": result,
+		"kind": o.Kind, "account": email, "model": model, "session": sid,
+		"attempts": attempts, "result": result,
 	})
 }
 
@@ -390,7 +467,7 @@ func reportNoHeadroom(skipped []candidate, o execOptions, sid string, attempts [
 		fmt.Fprintf(os.Stderr, "earliest return: %s\n", until.Local().Format("02.01.2006 15:04"))
 	}
 	if o.JSON {
-		out := map[string]any{"error": "no account has headroom", "session": sid, "attempts": attempts}
+		out := map[string]any{"kind": o.Kind, "error": "no account has headroom", "session": sid, "attempts": attempts}
 		if ok {
 			out["earliestReturn"] = until
 		}
@@ -437,10 +514,19 @@ func recordTurn(a *Account, model, outcome string, reset *time.Time, dir string)
 	}
 }
 
-// childEnv hands the child exactly one credential. ANTHROPIC_API_KEY silently outranks the OAuth
-// token and would bill the API instead of the subscription; ANTHROPIC_AUTH_TOKEN would route to a
-// gateway. Both go.
-func childEnv(token string) []string {
+// childEnv is what a child process gets in order to run as this account: a headless token for
+// Claude, a home directory for Codex. Nothing else about the account leaves the process.
+func (a *Account) childEnv() []string {
+	if a.kind() == kindCodex {
+		return codexChildEnv(codexHome(a.Email))
+	}
+	return claudeChildEnv(a.HeadlessToken)
+}
+
+// claudeChildEnv hands the child exactly one credential. ANTHROPIC_API_KEY silently outranks the
+// OAuth token and would bill the API instead of the subscription; ANTHROPIC_AUTH_TOKEN would route
+// to a gateway. Both go.
+func claudeChildEnv(token string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		switch strings.SplitN(kv, "=", 2)[0] {

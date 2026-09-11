@@ -123,3 +123,24 @@ func TestBenchedExpires(t *testing.T) {
 		t.Error("an account that never failed must not be benched")
 	}
 }
+
+// vibemon codex add writes the Codex order while the menu bar app is running; a tray toggle must
+// not save its own stale copy back over it.
+func TestMonitorPrefsKeepsOrdersWrittenBehindItsBack(t *testing.T) {
+	t.Setenv("VIBEMON_STATE", t.TempDir())
+	if err := savePrefs(prefs{Order: []string{"a"}, CodexOrder: []string{"codex:x@x.io"},
+		Projects: []projectPolicy{{Path: "/p", Accounts: []string{"a"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	m := &monitor{density: densityFull, autoSwitch: true, preferred: "a"}
+	p := m.prefs()
+	if len(p.CodexOrder) != 1 || p.CodexOrder[0] != "codex:x@x.io" {
+		t.Errorf("the codex order written by the CLI was lost: %+v", p.CodexOrder)
+	}
+	if len(p.Order) != 1 || len(p.Projects) != 1 {
+		t.Errorf("order and projects must survive too: %+v", p)
+	}
+	if p.Density != densityFull || !p.AutoSwitch || p.Preferred != "a" {
+		t.Errorf("the monitor's own preferences must win: %+v", p)
+	}
+}
