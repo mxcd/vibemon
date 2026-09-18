@@ -349,6 +349,7 @@ func cacheUsage(polled map[string]Usage) {
 	if len(polled) == 0 {
 		return
 	}
+	_ = recordHistory(polled, time.Now())
 	_, _ = updateFleet(func(st *fleetState) {
 		for k, u := range polled {
 			st.Usage[k] = u

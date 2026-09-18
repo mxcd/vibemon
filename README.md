@@ -23,6 +23,18 @@ in a click.
   preferred account once it recovers.
 - **Re-auth warnings** when an account's refresh token dies.
 
+### Dashboard
+
+While the menu bar app runs it also serves a dashboard at <http://127.0.0.1:6660>: every account
+as a table, with a column picker for what to show (plan, status, session and weekly windows with
+their reset countdowns, per-model limits, headless turns, credentials, fetch time, errors), and
+rundown charts of each limit over the last 6 hours to 14 days, so you can see a window climb and
+reset rather than only its current number. Both selections are saved. The page is server-rendered
+and refreshes itself every minute; nothing leaves your machine.
+
+Set `VIBEMON_WEB` (for example `127.0.0.1:8080`) to move it. It deliberately is not on 6666, which
+Chrome, Firefox and Safari all refuse as an unsafe port.
+
 ### Menu bar
 
 The label beside the icon has three densities, set from the tray menu:

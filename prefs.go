@@ -40,6 +40,16 @@ type prefs struct {
 	Order      []string        `json:"order,omitempty"`      // default exec priority for Claude accounts
 	CodexOrder []string        `json:"codexOrder,omitempty"` // the same, for ChatGPT (Codex) accounts
 	Projects   []projectPolicy `json:"projects,omitempty"`
+	Web        webPrefs        `json:"web"` // the dashboard's column and chart selection
+}
+
+// webPrefs is what the dashboard's column picker saves. Configured is false until the page has
+// saved once: before that an empty list means "the defaults", after it means "nothing".
+type webPrefs struct {
+	Configured bool     `json:"configured,omitempty"`
+	Columns    []string `json:"columns,omitempty"`
+	Charts     []string `json:"charts,omitempty"`
+	Range      string   `json:"range,omitempty"`
 }
 
 func loadPrefs() prefs {
@@ -65,6 +75,7 @@ func loadPrefs() prefs {
 	p.Order = stored.Order
 	p.CodexOrder = stored.CodexOrder
 	p.Projects = stored.Projects
+	p.Web = stored.Web
 	return p
 }
 

@@ -72,17 +72,26 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 | `prefs.go` | prefs.json: display, auto-switch, exec order and per-project account policies |
 | `exec.go` | `vibemon exec`: interactive pass-through or the headless limit-and-resume loop |
 | `fleet.go` | `fleet.json` ledger (turns, benches, usage cache), flock-based locks, account ranking |
+| `history.go` | `history.jsonl`: one usage sample per account per poll, feeds the dashboard charts |
+| `web.go` | the dashboard on `127.0.0.1:6660`: columns, rundown charts as server-side SVG, htmx swaps |
 | `limits.go` | limit message classifier and reset-time parser |
 | `icon.go` | the CRT tray glyph, drawn in code |
 | `main.go` | CLI subcommands and the GUI entrypoint |
 | `frontend/index.html` | the whole panel: markup, CSS and JS in one file |
 | `frontend/settings.html` | the settings window: tokens, default order, per-project account lists |
+| `web/index.html` | the dashboard template (`page` and `view`), CSS included; `web/htmx.min.js` is vendored |
 
 State lives in four places: Claude Code's keychain item (its own credentials), `vibemon-accounts`
 (our vault of stored accounts, including headless tokens), and under
 `~/Library/Application Support/vibemon/` (`VIBEMON_STATE` overrides it): `prefs.json` (display,
-auto-switch, exec policies, never secrets) and `fleet.json` (turns, benches, usage cache, written
-under a flock by every exec and by the monitor).
+auto-switch, exec policies, the dashboard's column selection, never secrets), `fleet.json` (turns,
+benches, usage cache, written under a flock by every exec and by the monitor) and `history.jsonl`
+(usage samples, appended by every poll, compacted by size to 14 days).
+
+The dashboard is loopback only and not on port 6666: every browser refuses that port (IRC
+blocklist). `VIBEMON_WEB` overrides the address. It is read-only apart from the column and chart
+selection, which POSTs to `/view`; POSTs require htmx's `HX-Request` header and every request a
+loopback `Host`, which is what keeps a cross-site page or a DNS-rebound one out.
 
 ## Conventions
 
@@ -102,6 +111,7 @@ under a flock by every exec and by the monitor).
 just check      # test + gofmt + vet
 just run        # build and launch the menu bar app
 just icon       # render the tray glyph and open it — the only way to judge icon.go
+just web-preview # render the dashboard with seeded data and open it in the browser
 just install    # build to ~/.local/bin
 just autostart  # LaunchAgent for login start
 ```

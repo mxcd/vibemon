@@ -1,0 +1,235 @@
+{{define "page"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>vibemon</title>
+<script src="/htmx.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --text: #15181c;
+    --muted: #5f6873;
+    --border: #dfe3e8;
+    --track: #e9ecf0;
+    --ok: #1a9e5a;
+    --warning: #d97706;
+    --critical: #dc2626;
+    --active: #eef6ff;
+    --shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --surface: #171b21;
+      --text: #e8eaed;
+      --muted: #9aa4b0;
+      --border: #2a313a;
+      --track: #252b33;
+      --ok: #3ccf7a;
+      --warning: #fbbf24;
+      --critical: #f87171;
+      --active: #1b2633;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 20px 28px 48px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  header h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+  header .stamp { color: var(--muted); font-size: 13px; }
+  header .tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  button, summary {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    font: inherit; font-size: 13px; font-weight: 500;
+    padding: 6px 12px; cursor: pointer; border-radius: 6px; list-style: none; user-select: none;
+    box-shadow: var(--shadow);
+  }
+  summary::-webkit-details-marker { display: none; }
+  button:hover, summary:hover, details[open] summary { border-color: var(--muted); }
+  .htmx-request button { opacity: .5; }
+
+  details { position: relative; }
+  details .menu {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 2; min-width: 190px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.14);
+  }
+  .menu label { display: flex; gap: 10px; align-items: center; padding: 5px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; font-size: 14px; }
+  .menu label:hover { background: var(--bg); }
+  .menu input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--ok); }
+  .menu hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+  .menu select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; padding: 3px 6px; margin-left: auto; }
+
+  .notice { color: var(--warning); font-weight: 500; padding: 0 0 12px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  th { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--bg); }
+  tr.group td { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 8px 16px; background: var(--bg); }
+  tr.active td { background: var(--active); }
+  td.email { font-weight: 600; }
+  td.email .tag { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 600; color: var(--ok); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; vertical-align: 1px; }
+  td.dim, .dim { color: var(--muted); }
+  td.gauge { min-width: 170px; }
+  .gauge .pct { font-size: 20px; font-weight: 650; line-height: 1.1; }
+  .gauge .reset { font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .bar { display: block; height: 6px; margin-top: 6px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
+  .warning .pct { color: var(--warning); } .warning .bar i { background: var(--warning); }
+  .critical .pct { color: var(--critical); } .critical .bar i { background: var(--critical); }
+  .model { display: flex; flex-direction: column; gap: 2px; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; color: var(--warning); border: 1px solid currentColor; border-radius: 999px; padding: 1px 8px; }
+  .empty { padding: 48px 0; color: var(--muted); text-align: center; }
+
+  h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 32px 0 12px; }
+  .row { display: grid; grid-template-columns: 160px 1fr; gap: 16px; align-items: start; margin-bottom: 14px; }
+  .row .who { font-weight: 600; padding-top: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* auto-fill, not auto-fit: an account with one chart keeps the column width of the others. */
+  .row .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .chart { padding: 12px 14px 8px; }
+  .chart .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .chart .top b { font-weight: 600; }
+  .chart .pct { font-size: 20px; font-weight: 650; }
+  .warning .top .pct { color: var(--warning); }
+  .critical .top .pct { color: var(--critical); }
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  svg .grid { stroke: var(--border); stroke-width: 1; }
+  svg .warn { stroke: var(--warning); stroke-width: 1; stroke-dasharray: 4 4; opacity: .7; }
+  svg .crit { stroke: var(--critical); stroke-width: 1; stroke-dasharray: 4 4; opacity: .7; }
+  svg polyline { fill: none; stroke: var(--ok); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  svg circle { fill: var(--ok); }
+  .warning svg polyline { stroke: var(--warning); } .warning svg circle { fill: var(--warning); }
+  .critical svg polyline { stroke: var(--critical); } .critical svg circle { fill: var(--critical); }
+  svg text { fill: var(--muted); font: 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (max-width: 700px) {
+    body { padding: 14px; }
+    .row { grid-template-columns: 1fr; gap: 6px; }
+    .row .who { padding-top: 0; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>vibemon</h1>
+    {{template "stamp" .}}
+    <div class="tools">
+      <button hx-post="/refresh" hx-target="#main">Refresh</button>
+      <form hx-post="/view" hx-target="#main" hx-trigger="change" style="display:contents">
+        <details>
+          <summary>Columns</summary>
+          <div class="menu">
+            {{range .Columns}}<label><input type="checkbox" name="col" value="{{.ID}}"{{if index $.Shown .ID}} checked{{end}}> {{if eq .ID "model"}}{{$.ModelName}}{{else}}{{.Name}}{{end}}</label>
+            {{end}}
+          </div>
+        </details>
+        <details>
+          <summary>Charts</summary>
+          <div class="menu">
+            {{range .ChartGauges}}<label><input type="checkbox" name="chart" value="{{.ID}}"{{if index $.Charted .ID}} checked{{end}}> {{if eq .ID "model"}}{{$.ModelName}}{{else}}{{.Name}}{{end}}</label>
+            {{end}}
+            <hr>
+            <label>Range <select name="range">{{range .Ranges}}<option value="{{.ID}}"{{if eq .ID $.Range}} selected{{end}}>{{.ID}}</option>{{end}}</select></label>
+          </div>
+        </details>
+      </form>
+    </div>
+  </header>
+
+  <main id="main" hx-get="/view" hx-trigger="every 60s">{{template "view" .}}</main>
+  <script>
+    // The monitor pushes a wakeup after every poll; the minute timer above is the fallback.
+    new EventSource('/events').addEventListener('state', () => htmx.ajax('GET', '/view', '#main'));
+  </script>
+</body>
+</html>{{end}}
+
+{{define "stamp"}}<span id="stamp" class="stamp num"{{if .OOB}} hx-swap-oob="true"{{end}}>{{if .State.UpdatedAt.IsZero}}waiting for the first poll{{else}}polled {{stamp .State.UpdatedAt}}{{end}}</span>{{end}}
+
+{{define "view"}}
+{{with .State.Notice}}<div class="notice">{{.}}</div>{{end}}
+{{if not .State.Accounts}}<div class="card"><div class="empty">No accounts stored yet. Log in with Claude Code, then Capture from the menu bar.</div></div>{{else}}
+<div class="card">
+<table>
+  <thead><tr>{{range .Columns}}{{if index $.Shown .ID}}<th>{{if eq .ID "model"}}{{$.ModelName}}{{else}}{{.Name}}{{end}}</th>{{end}}{{end}}</tr></thead>
+  <tbody>
+  {{$kind := ""}}
+  {{range .State.Accounts}}{{$a := .}}{{$u := .Usage}}
+  {{if ne .Kind $kind}}{{$kind = .Kind}}<tr class="group"><td colspan="{{colspan $.Shown}}">{{if eq .Kind "codex"}}Codex · ChatGPT{{else}}Claude{{end}}</td></tr>{{end}}
+  <tr class="{{if .Active}}active{{end}}">
+    {{range $.Columns}}{{if index $.Shown .ID}}
+      {{if eq .ID "email"}}<td class="email">{{if $a.Preferred}}★ {{end}}{{$a.Email}}{{if $a.Active}}<span class="tag">active</span>{{end}}</td>
+      {{else if eq .ID "plan"}}<td class="dim">{{$a.Plan}}</td>
+      {{else if eq .ID "org"}}<td class="dim">{{$a.OrgName}}</td>
+      {{else if eq .ID "status"}}<td>
+        {{- if $a.NeedsReauth}}<span class="badge">needs login</span>
+        {{- else if $a.BenchedUntil}}<span class="badge" title="{{$a.BenchReason}}">benched {{until $a.BenchedUntil}}</span>
+        {{- else if $a.Active}}active
+        {{- else if eq $a.Kind "codex"}}<span class="dim">in pool</span>
+        {{- else}}<span class="dim">parked</span>{{end}}</td>
+      {{else if eq .ID "session"}}{{template "gaugecell" (and $u $u.Session)}}
+      {{else if eq .ID "weekly"}}{{template "gaugecell" (and $u $u.Weekly)}}
+      {{else if eq .ID "model"}}<td class="gauge">
+        {{- if $u}}{{with $u.Scoped}}{{if ne .Label $.ModelName}}<div class="dim">{{.Label}}</div>{{end}}{{template "gaugebody" .}}{{end}}
+        {{- if $u.Extra}}<div class="model num">{{range $u.Extra}}<span class="{{.Class}}"><span class="dim">{{.Label}}</span> <b class="pct" style="font-size:14px">{{pct .Percent}}</b>{{with .ResetsAt}}<span class="reset">{{until .}}</span>{{end}}</span>{{end}}</div>{{end}}
+        {{- if and (not $u.Scoped) (not $u.Extra)}}<span class="dim">-</span>{{end}}{{else}}<span class="dim">-</span>{{end}}</td>
+      {{else if eq .ID "turns"}}<td class="dim num">{{if $a.Turns}}{{$a.Turns}}{{else}}-{{end}}</td>
+      {{else if eq .ID "creds"}}<td class="dim">
+        {{- if eq $a.Kind "codex"}}{{if $a.HasLogin}}logged in{{else}}not logged in{{end}}
+        {{- else}}{{if $a.HasLogin}}login{{end}}{{if and $a.HasLogin $a.HasToken}} + {{end}}{{if $a.HasToken}}token{{end}}{{if not (or $a.HasLogin $a.HasToken)}}-{{end}}{{end}}</td>
+      {{else if eq .ID "fetched"}}<td class="dim num">{{if $u}}{{clock $u.FetchedAt}}{{else}}-{{end}}</td>
+      {{else if eq .ID "error"}}<td>{{with $a.Error}}<span class="badge">{{.}}</span>{{end}}</td>
+      {{end}}
+    {{end}}{{end}}
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+{{if .Charts}}
+<h2>Rundown, last {{.Range}}</h2>
+{{range .Charts}}
+<div class="row">
+  <div class="who">{{.Email}}</div>
+  <div class="charts">
+  {{range .Charts}}
+  <div class="card chart {{.Class}}">
+    <div class="top"><b>{{if eq .Gauge "Session"}}5h window{{else}}{{.Gauge}}{{end}}</b><span class="pct num">{{pct .Percent}}</span></div>
+    <svg viewBox="0 0 320 100" xmlns="http://www.w3.org/2000/svg">
+      <line class="grid" x1="28" x2="312" y1="86" y2="86"/>
+      <line class="grid" x1="28" x2="312" y1="{{$.Y50}}" y2="{{$.Y50}}"/>
+      <line class="grid" x1="28" x2="312" y1="6" y2="6"/>
+      <line class="warn" x1="28" x2="312" y1="{{$.Y80}}" y2="{{$.Y80}}"/>
+      <line class="crit" x1="28" x2="312" y1="{{$.Y95}}" y2="{{$.Y95}}"/>
+      <text x="23" y="9" text-anchor="end">100</text><text x="23" y="{{$.Y50}}" dy="3" text-anchor="end">50</text><text x="23" y="89" text-anchor="end">0</text>
+      {{range .Ticks}}<line class="grid" x1="{{.X}}" x2="{{.X}}" y1="86" y2="90"/><text x="{{.X}}" y="99" text-anchor="middle">{{.Label}}</text>{{end}}
+      <polyline points="{{.Points}}"/>
+      <circle cx="{{.EndX}}" cy="{{.EndY}}" r="3"/>
+    </svg>
+  </div>
+  {{end}}
+  </div>
+</div>
+{{end}}
+{{else if .Charted}}<p class="dim" style="margin-top:24px">No usage history in this range yet. Samples arrive with every poll.</p>{{end}}
+{{end}}
+
+{{/* gaugecell takes a Gauge, or false when the account has no usage at all. */}}
+{{define "gaugecell"}}<td class="gauge {{with .}}{{.Class}}{{end}}">{{if .}}{{template "gaugebody" .}}{{else}}<span class="dim">-</span>{{end}}</td>{{end}}
+
+{{define "gaugebody"}}{{if .Live}}<div class="num"><span class="pct">{{pct .Percent}}</span>{{with .ResetsAt}}<span class="reset">resets in {{until .}}</span>{{end}}</div><span class="bar"><i style="width:{{pct .Percent}}"></i></span>{{else}}<span class="dim">-</span>{{end}}{{end}}

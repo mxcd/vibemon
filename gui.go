@@ -234,6 +234,7 @@ func runGUI() error {
 	// first label into a systray that has not been created yet, leaving it stuck until the next tick.
 	m.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go m.loop()
+		go m.serveWeb()
 	})
 
 	return m.app.Run()
@@ -626,6 +627,7 @@ func (m *monitor) publish() {
 	m.app.Event.Emit("state", m.state)
 	m.tray.SetLabel(m.trayLabel())
 	m.tray.SetMenu(m.buildMenu())
+	webWake()
 }
 
 // trayLabel renders the text beside the icon. In condensed mode it stays empty so only the glyph

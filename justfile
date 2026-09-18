@@ -34,6 +34,15 @@ icon:
     sips -z 264 264 "$out" --out "${out%.png}-8x.png" >/dev/null
     open "${out%.png}-8x.png"
 
+# Render the dashboard with seeded accounts and a day of history, and open it in the browser.
+web-preview:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    cp web/htmx.min.js "$dir/"
+    VIBEMON_STATE="$dir/state" VIBEMON_WEB_OUT="$dir/index.html" go test -run TestWebPreview . >/dev/null
+    open "$dir/index.html"
+
 install: check build stop
     mkdir -p {{prefix}}
     cp {{bin}} {{prefix}}/{{bin}}
