@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,5 +236,217 @@ func TestPlaceCodexHome(t *testing.T) {
 	// An address that is not one cannot become a directory name.
 	if _, err := placeCodexHome(tmp, true, "../../.codex", ""); err == nil {
 		t.Error("a traversing address must be refused")
+	}
+}
+
+// fakeJWT builds an unsigned token whose payload carries exp and a tag naming it in assertions.
+func fakeJWT(tag string, exp time.Time) string {
+	payload, _ := json.Marshal(map[string]any{"tag": tag, "exp": exp.Unix()})
+	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+// writeCodexAuth writes an auth.json shaped like codex's own, plus fields vibemon does not know,
+// which a refresh must carry through untouched.
+func writeCodexAuth(t *testing.T, home, access string) string {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "auth.json")
+	raw := `{
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": null,
+  "tokens": {"id_token": "id-1", "access_token": "` + access + `", "refresh_token": "rt-1", "account_id": "acct-1", "future": {"x": [1, 2]}},
+  "last_refresh": "2026-10-01T08:00:00.123456Z",
+  "agent_identity": {"kind": "kept <as is> & whole"}
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// tokenServer stands in for auth.openai.com: it answers every refresh with reply and counts calls.
+func tokenServer(t *testing.T, status int, reply string) *int {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var grant map[string]string
+		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" ||
+			json.NewDecoder(r.Body).Decode(&grant) != nil ||
+			grant["client_id"] != codexClientID || grant["grant_type"] != "refresh_token" || grant["refresh_token"] == "" || len(grant) != 3 {
+			t.Errorf("refresh request is not codex's: %s %s %v", r.Method, r.Header.Get("Content-Type"), grant)
+		}
+		w.WriteHeader(status)
+		io.WriteString(w, reply)
+	}))
+	t.Cleanup(srv.Close)
+	old := codexTokenURL
+	codexTokenURL = srv.URL
+	t.Cleanup(func() { codexTokenURL = old })
+	return &calls
+}
+
+func TestCodexTokenStale(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		token string
+		stale bool
+	}{
+		{"ten minutes left", fakeJWT("a", now.Add(10*time.Minute)), false},
+		{"inside codex's five minute window", fakeJWT("a", now.Add(4*time.Minute)), true},
+		{"expired", fakeJWT("a", now.Add(-time.Hour)), true},
+		{"not a JWT: upstream's 401 decides", "opaque", false},
+		{"no exp", "x." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"a"}`)) + ".y", false},
+	}
+	for _, tc := range cases {
+		if got := codexTokenStale(tc.token, now); got != tc.stale {
+			t.Errorf("%s: stale = %v, want %v", tc.name, got, tc.stale)
+		}
+	}
+}
+
+// The write-back is the risky half: codex reads this file on every start, and anything lost in it
+// (the account id, a field a newer codex added) breaks the login for good.
+func TestRefreshCodexAuthWritesLikeCodex(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "a@x.io")
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	stale := fakeJWT("old", now.Add(time.Minute))
+	path := writeCodexAuth(t, home, stale)
+	fresh := fakeJWT("new", now.Add(10*24*time.Hour))
+	calls := tokenServer(t, http.StatusOK, `{"id_token":"id-2","access_token":"`+fresh+`","refresh_token":"rt-2"}`)
+
+	a, err := refreshCodexAuth(home, stale, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 1 || a.Tokens.AccessToken != fresh || a.Tokens.AccountID != "acct-1" {
+		t.Fatalf("calls %d, got %+v", *calls, a.Tokens)
+	}
+	var doc map[string]any
+	raw, _ := os.ReadFile(path)
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	tok := doc["tokens"].(map[string]any)
+	want := map[string]any{"id_token": "id-2", "access_token": fresh, "refresh_token": "rt-2", "account_id": "acct-1"}
+	for k, v := range want {
+		if tok[k] != v {
+			t.Errorf("tokens.%s = %v, want %v", k, tok[k], v)
+		}
+	}
+	if fmt.Sprint(tok["future"]) != "map[x:[1 2]]" || doc["auth_mode"] != "chatgpt" ||
+		doc["OPENAI_API_KEY"] != nil || len(doc) != 5 ||
+		fmt.Sprint(doc["agent_identity"]) != "map[kind:kept <as is> & whole]" {
+		t.Errorf("a field vibemon does not own changed: %s", raw)
+	}
+	if doc["last_refresh"] != "2026-10-27T12:00:00Z" {
+		t.Errorf("last_refresh = %v", doc["last_refresh"])
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("auth.json mode %v, want 0600", fi.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(home)
+	for _, e := range entries {
+		if e.Name() != "auth.json" && e.Name() != codexRefreshLock {
+			t.Errorf("left behind: %s", e.Name())
+		}
+	}
+
+	// A refresh that does not rotate the refresh token, or sends no id_token, keeps the ones on disk.
+	newer := fakeJWT("newer", now.Add(20*24*time.Hour))
+	calls = tokenServer(t, http.StatusOK, `{"access_token":"`+newer+`"}`)
+	if a, err = refreshCodexAuth(home, fresh, now); err != nil || a.Tokens.AccessToken != newer || a.Tokens.RefreshToken != "rt-2" {
+		t.Fatalf("second refresh: %v %+v", err, a.Tokens)
+	}
+	raw, _ = os.ReadFile(path)
+	if !strings.Contains(string(raw), `"id_token": "id-2"`) {
+		t.Errorf("an id_token the endpoint did not send was dropped: %s", raw)
+	}
+}
+
+// Two refreshers on one refresh token: the second would spend a rotation that is already gone and
+// log the home out. Under the lock the file is read again, and a token that changed meanwhile wins.
+func TestRefreshCodexAuthUsesWhatChangedUnderTheLock(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "a@x.io")
+	now := time.Now()
+	stale := fakeJWT("old", now.Add(time.Minute))
+	writeCodexAuth(t, home, stale)
+	calls := tokenServer(t, http.StatusOK, `{"access_token":"must-not-be-used"}`)
+
+	release, err := lockFile(filepath.Join(home, codexRefreshLock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		a   codexAuth
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		a, err := refreshCodexAuth(home, stale, now)
+		done <- result{a, err}
+	}()
+	select {
+	case <-done:
+		t.Fatal("the refresh ran while another holder had the home's lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	byCodex := fakeJWT("codex", now.Add(10*24*time.Hour))
+	writeCodexAuth(t, home, byCodex)
+	release()
+
+	r := <-done
+	if r.err != nil || r.a.Tokens.AccessToken != byCodex {
+		t.Fatalf("want the token written meanwhile, got %v %q", r.err, r.a.Tokens.AccessToken)
+	}
+	if *calls != 0 {
+		t.Errorf("the endpoint was called %d times although the file had already changed", *calls)
+	}
+}
+
+// Rule 4 on the refresh: a rejected grant is a dead login, anything else is temporary, and neither
+// touches the file.
+func TestRefreshCodexAuthClassifiesFailures(t *testing.T) {
+	cases := []struct {
+		status int
+		reauth bool
+	}{
+		{http.StatusBadRequest, true},
+		{http.StatusUnauthorized, true},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+	}
+	for _, tc := range cases {
+		home := filepath.Join(t.TempDir(), "a@x.io")
+		stale := fakeJWT("old", time.Now())
+		path := writeCodexAuth(t, home, stale)
+		before, _ := os.ReadFile(path)
+		tokenServer(t, tc.status, `{"error":"refresh_token_reused"}`)
+		_, err := refreshCodexAuth(home, stale, time.Now())
+		if err == nil || errors.Is(err, errNeedsReauth) != tc.reauth {
+			t.Errorf("HTTP %d: err %v, want needs re-auth %v", tc.status, err, tc.reauth)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Errorf("HTTP %d: a failed refresh rewrote auth.json", tc.status)
+		}
+	}
+}
+
+// ~/.codex is MaPa's own login: no code path may refresh it, whatever home it is handed.
+func TestRefreshCodexAuthNeverTouchesTheOwnLogin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	own := filepath.Join(os.Getenv("HOME"), ".codex")
+	stale := fakeJWT("own", time.Now())
+	path := writeCodexAuth(t, own, stale)
+	before, _ := os.ReadFile(path)
+	calls := tokenServer(t, http.StatusOK, `{"access_token":"x"}`)
+	if _, err := refreshCodexAuth(own+"/", stale, time.Now()); err == nil {
+		t.Error("refreshing ~/.codex must be refused")
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) || *calls != 0 {
+		t.Error("~/.codex was touched")
 	}
 }

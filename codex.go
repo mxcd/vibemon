@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +19,9 @@ import (
 var codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
 // Codex (ChatGPT) accounts. One CODEX_HOME per login: codex keeps auth.json, config.toml and its
-// sessions there, so a directory is the whole identity. vibemon reads auth.json and never writes
-// it: codex owns those tokens and refreshes them in place.
+// sessions there, so a directory is the whole identity. codex refreshes those tokens in place while
+// it runs in a home; the Codex proxy refreshes a pooled home it sends with when its token is about
+// to run out, under that home's lock, never ~/.codex (refreshCodexAuth).
 
 // codexHomesDir is where vibemon keeps the homes it manages. VIBEMON_CODEX_HOMES overrides it for
 // tests, mirroring VIBEMON_STATE. The user's own ~/.codex is never touched.
@@ -88,26 +91,31 @@ func codexLoggedIn(home string) bool {
 
 // --- auth.json ---------------------------------------------------------------
 
-// codexAuth is the part of a home's auth.json vibemon reads. Everything else in that file, the
-// refresh token above all, is codex's business.
+// codexAuth is the part of a home's auth.json vibemon reads. Everything else in that file is
+// codex's business and passes through a refresh untouched.
 type codexAuth struct {
 	Tokens struct {
-		AccessToken string `json:"access_token"`
-		AccountID   string `json:"account_id"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		AccountID    string `json:"account_id"`
 	} `json:"tokens"`
 }
 
 // readCodexAuth reads a home's auth.json. A missing file or an empty token is errNeedsReauth: the
 // account exists but has no usable login.
 func readCodexAuth(home string) (codexAuth, error) {
-	var a codexAuth
 	raw, err := os.ReadFile(filepath.Join(home, "auth.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return a, fmt.Errorf("%s has no login: %w", home, errNeedsReauth)
+			return codexAuth{}, fmt.Errorf("%s has no login: %w", home, errNeedsReauth)
 		}
-		return a, err
+		return codexAuth{}, err
 	}
+	return parseCodexAuth(home, raw)
+}
+
+func parseCodexAuth(home string, raw []byte) (codexAuth, error) {
+	var a codexAuth
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return a, fmt.Errorf("%s/auth.json is not valid JSON: %w", home, err)
 	}
@@ -118,6 +126,128 @@ func readCodexAuth(home string) (codexAuth, error) {
 		return a, fmt.Errorf("%s/auth.json carries no account_id", home)
 	}
 	return a, nil
+}
+
+// What codex itself uses to refresh a ChatGPT login (login/src/auth/manager.rs, codex 0.163.0). The
+// URL is a var so tests can point it at a local server.
+var codexTokenURL = "https://auth.openai.com/oauth/token"
+
+const (
+	codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	// codex refreshes this long before the access token's exp, and so does the proxy.
+	codexRefreshWindow = 5 * time.Minute
+	codexRefreshLock   = ".vibemon-refresh.lock"
+)
+
+// codexTokenStale reports whether an access token expires within codexRefreshWindow of now, read
+// from its JWT exp. A token whose exp cannot be read counts as fresh: upstream's 401 is then what
+// asks for the refresh.
+func codexTokenStale(token string, now time.Time) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Exp == 0 {
+		return false
+	}
+	return !time.Unix(claims.Exp, 0).After(now.Add(codexRefreshWindow))
+}
+
+// refreshCodexAuth renews a pooled home's login the way codex does: the same endpoint, client id
+// and JSON grant, and the same write-back (new tokens and last_refresh, everything else kept).
+// stale is the access token the caller found expiring or saw rejected. Under the home's lock
+// auth.json is read again first; when it no longer holds that token, codex (or another vibemon) has
+// refreshed meanwhile and its result is used, because a second refresh would spend the rotation of
+// a refresh token that is already gone.
+//
+// ponytail: codex itself neither takes this lock nor writes atomically, so a codex running in the
+// same home can still race this refresh; the re-read only narrows the window. Upgrade path: none
+// short of codex honouring a lock, which is why the proxy refreshes only near expiry or on a 401.
+func refreshCodexAuth(home, stale string, now time.Time) (codexAuth, error) {
+	if cleanPath(home) == cleanPath(filepath.Join(os.Getenv("HOME"), ".codex")) {
+		return codexAuth{}, fmt.Errorf("%s is the interactive login and is never refreshed by vibemon", home)
+	}
+	release, err := lockFile(filepath.Join(home, codexRefreshLock))
+	if err != nil {
+		return codexAuth{}, err
+	}
+	defer release()
+	path := filepath.Join(home, "auth.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return codexAuth{}, fmt.Errorf("%s has no login: %w", home, errNeedsReauth)
+		}
+		return codexAuth{}, err
+	}
+	a, err := parseCodexAuth(home, raw)
+	if err != nil || a.Tokens.AccessToken != stale {
+		return a, err
+	}
+	if a.Tokens.RefreshToken == "" {
+		return a, fmt.Errorf("%s/auth.json carries no refresh token: %w", home, errNeedsReauth)
+	}
+	var fresh struct {
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	err = postToken(codexTokenURL, map[string]string{
+		"client_id":     codexClientID,
+		"grant_type":    "refresh_token",
+		"refresh_token": a.Tokens.RefreshToken,
+	}, &fresh)
+	if err != nil {
+		return a, fmt.Errorf("%s: %w", home, err)
+	}
+	if fresh.AccessToken == "" {
+		return a, fmt.Errorf("%s: refresh: response carried no access_token", home)
+	}
+	next, err := patchCodexAuth(raw, map[string]string{
+		"id_token": fresh.IDToken, "access_token": fresh.AccessToken, "refresh_token": fresh.RefreshToken,
+	}, now)
+	if err != nil {
+		return a, fmt.Errorf("%s/auth.json: %w", home, err)
+	}
+	if err := writeFileAtomic(path, next); err != nil {
+		return a, err
+	}
+	return parseCodexAuth(home, next)
+}
+
+// patchCodexAuth sets the non-empty tokens and last_refresh in an auth.json and keeps every other
+// field, in tokens and at the top level, as the raw JSON it arrived as. An empty value is one the
+// endpoint did not rotate, exactly as codex treats it.
+func patchCodexAuth(raw []byte, tokens map[string]string, now time.Time) ([]byte, error) {
+	var doc, tok map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(doc["tokens"], &tok); err != nil || tok == nil {
+		return nil, fmt.Errorf("no tokens object")
+	}
+	for k, v := range tokens {
+		if v != "" {
+			tok[k], _ = json.Marshal(v)
+		}
+	}
+	doc["tokens"], _ = json.Marshal(tok)
+	doc["last_refresh"], _ = json.Marshal(now.UTC().Format(time.RFC3339Nano))
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // --- usage -------------------------------------------------------------------
@@ -202,7 +332,8 @@ func (r *codexUsageResponse) normalize(now time.Time) Usage {
 }
 
 // fetchCodexUsage asks the wham endpoint what one home's login has left. It never refreshes the
-// access token: codex owns it and rotates it inside the same home, and two refreshers would race.
+// access token: the poll runs every tick for every account, and each refresh is a rotation that a
+// codex running in that home could race. Only the Codex proxy refreshes, and only when it must.
 func fetchCodexUsage(home string) (codexUsageResponse, error) {
 	var r codexUsageResponse
 	auth, err := readCodexAuth(home)
