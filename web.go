@@ -407,13 +407,8 @@ func webEvents(w http.ResponseWriter, r *http.Request) {
 // Host that is not ours means DNS rebinding, and a POST without htmx's header means a cross-site
 // form (a fetch that adds the header needs a CORS preflight, which nothing here answers).
 func guard(next http.Handler) http.Handler {
-	own, _, _ := net.SplitHostPort(webAddr())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
-		}
-		if host != own && host != "localhost" && host != "127.0.0.1" {
+		if !loopbackHost(r.Host, webAddr()) {
 			http.Error(w, "unexpected Host", http.StatusForbidden)
 			return
 		}
@@ -423,6 +418,17 @@ func guard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// loopbackHost reports whether hostport (a Host header or URL host, port optional) names the
+// loopback server listening on addr. Only the name is compared: DNS rebinding changes the name.
+func loopbackHost(hostport, addr string) bool {
+	own, _, _ := net.SplitHostPort(addr)
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	return host == own || host == "localhost" || host == "127.0.0.1"
 }
 
 func (m *monitor) serveWeb() {
