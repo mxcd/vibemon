@@ -43,9 +43,13 @@ web-preview:
     VIBEMON_STATE="$dir/state" VIBEMON_WEB_OUT="$dir/index.html" go test -run TestWebPreview . >/dev/null
     open "$dir/index.html"
 
-install: check build stop
+# Swap the binary in atomically, then restart. Stopping first raced KeepAlive: launchd relaunched the
+# old binary before the copy landed.
+install: check build
     mkdir -p {{prefix}}
-    cp {{bin}} {{prefix}}/{{bin}}
+    cp {{bin}} {{prefix}}/.{{bin}}.new
+    mv -f {{prefix}}/.{{bin}}.new {{prefix}}/{{bin}}
+    launchctl kickstart -k gui/$(id -u)/com.mxcd.vibemon 2>/dev/null || pkill -x {{bin}} || true
     @echo "installed to {{prefix}}/{{bin}}"
 
 # Start vibemon at login and keep it alive if it crashes.
