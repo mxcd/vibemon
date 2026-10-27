@@ -62,7 +62,7 @@ func main() {
 	case "exec":
 		os.Exit(cmdExec(os.Args[2:]))
 	case "proxy":
-		err = serveProxy()
+		err = serveProxies()
 	case "help", "-h", "--help":
 		usageText()
 	default:
@@ -97,9 +97,21 @@ func usageText() {
                            resume under the next account when a limit hits (vibemon exec --help)
   vibemon exec --kind codex [flags] [--] codex exec ...
                            the same for a ChatGPT account, under its own CODEX_HOME
-  vibemon proxy            run the auth proxy in the foreground (the menu bar app runs it too):
+  vibemon proxy            run both auth proxies in the foreground (the menu bar app runs them too):
                            with ANTHROPIC_BASE_URL=http://127.0.0.1:6661, every request carries
-                           the active account's token, so a switch reaches running sessions`)
+                           the active account's token, so a switch reaches running sessions;
+                           codex -c openai_base_url=http://127.0.0.1:6662/backend-api/codex
+                           runs on the pooled ChatGPT accounts, moving on when a limit hits`)
+}
+
+// serveProxies runs the Claude and the Codex proxy until both have stopped: one whose port is
+// taken is reported and the other keeps serving.
+func serveProxies() error {
+	errs := make(chan error, 2)
+	go func() { errs <- serveProxy() }()
+	go func() { errs <- serveCodexProxy() }()
+	fmt.Fprintln(os.Stderr, "vibemon:", <-errs)
+	return <-errs
 }
 
 func cmdCapture() error {

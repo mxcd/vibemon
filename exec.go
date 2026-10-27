@@ -24,6 +24,10 @@ const (
 	exitTooLong    = 3 // context exhausted: the caller must start over with a compact brief
 )
 
+// defaultCeiling is the usage percent at which exec, and the Codex proxy, stop starting on an
+// account.
+const defaultCeiling = 90
+
 // Test seams: the vault lives in the keychain and the retry pause is 30 s.
 var (
 	vaultLoader = loadVault
@@ -80,7 +84,7 @@ func parseExecArgs(args []string) (execOptions, error) {
 	fs.StringVar(&o.Model, "model", "", "model to run; per-model caps fall back down the list")
 	fs.StringVar(&o.Only, "account", "", "force this account (email)")
 	fs.StringVar(&exclude, "exclude", "", "comma-separated emails to skip")
-	fs.Float64Var(&o.Ceiling, "ceiling", 90, "usage percent at which an account counts as spent")
+	fs.Float64Var(&o.Ceiling, "ceiling", defaultCeiling, "usage percent at which an account counts as spent")
 	fs.StringVar(&fallback, "fallback", strings.Join(modelOrder, ","), "model fallback order")
 	fs.BoolVar(&o.Wait, "wait", false, "sleep until an account comes back instead of exiting 2")
 	fs.BoolVar(&o.JSON, "json", false, "print {account, model, attempts, session, result}")
