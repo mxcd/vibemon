@@ -80,7 +80,8 @@ func usageText() {
   vibemon                  run the menu bar app
   vibemon capture         store the account Claude Code is currently logged into
   vibemon list             list stored accounts (* marks the active one)
-  vibemon switch <email>   make an account active for the next Claude Code start
+  vibemon switch <email>   make an account active: sessions on the auth proxy follow at once,
+                           others on their next start
   vibemon remove [--kind claude|codex] <email>
                            forget an account (does not log Claude Code or codex out)
   vibemon usage            show usage for every stored account
@@ -284,12 +285,12 @@ func cmdSwitch(email string) error {
 		return nil
 	}
 	if n := claudeSessionsRunning(); n > 0 {
-		fmt.Printf("warning: %d claude process(es) running — they keep the old account until restarted\n", n)
+		fmt.Printf("warning: %d claude process(es) running; those not on the auth proxy keep the old account until restarted\n", n)
 	}
 	if err := switchTo(v, target.UUID); err != nil {
 		return err
 	}
-	fmt.Printf("switched to %s — restart Claude Code to pick it up\n", target.Email)
+	fmt.Printf("switched to %s: sessions on the auth proxy follow on their next request, others need a restart\n", target.Email)
 	return nil
 }
 
