@@ -728,6 +728,11 @@ func (m *monitor) buildMenu() *application.Menu {
 	}
 	menu.AddSeparator()
 	menu.Add("Settings…").OnClick(func(*application.Context) { m.showSettings() })
+	menu.Add("Open dashboard").OnClick(func(*application.Context) {
+		if err := m.app.Browser.OpenURL("http://" + webAddr()); err != nil {
+			m.notify("could not open the dashboard: " + err.Error())
+		}
+	})
 	menu.Add("Capture current account").OnClick(func(*application.Context) { go m.capture() })
 	menu.Add("Refresh now").OnClick(func(*application.Context) { go m.poll(true) })
 	menu.AddSeparator()
