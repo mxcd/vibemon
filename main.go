@@ -61,6 +61,8 @@ func main() {
 		err = cmdPick(os.Args[2:])
 	case "exec":
 		os.Exit(cmdExec(os.Args[2:]))
+	case "proxy":
+		err = serveProxy()
 	case "help", "-h", "--help":
 		usageText()
 	default:
@@ -93,7 +95,10 @@ func usageText() {
                            run claude under the project's first available account; with -p,
                            resume under the next account when a limit hits (vibemon exec --help)
   vibemon exec --kind codex [flags] [--] codex exec ...
-                           the same for a ChatGPT account, under its own CODEX_HOME`)
+                           the same for a ChatGPT account, under its own CODEX_HOME
+  vibemon proxy            run the auth proxy in the foreground (the menu bar app runs it too):
+                           with ANTHROPIC_BASE_URL=http://127.0.0.1:6661, every request carries
+                           the active account's token, so a switch reaches running sessions`)
 }
 
 func cmdCapture() error {

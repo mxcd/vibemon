@@ -235,6 +235,12 @@ func runGUI() error {
 	m.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go m.loop()
 		go m.serveWeb()
+		go func() {
+			// A taken port (a foreground `vibemon proxy`, say) only costs the proxy, not the app.
+			if err := serveProxy(); err != nil {
+				log.Printf("vibemon: %v", err)
+			}
+		}()
 	})
 
 	return m.app.Run()
