@@ -49,11 +49,32 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 - **One `CODEX_HOME` per login**, at `~/.vibemon/codex/<email>` (`VIBEMON_CODEX_HOMES` overrides the
   parent). The directory is the whole identity; `vibemon codex add <email>` adopts one that is
   already logged in and only runs `codex login` when there is none.
-- **vibemon reads `auth.json` and never writes it.** codex owns those tokens and refreshes them in
-  its own home; a second refresher would race the rotation. The email and plan always come from the
-  usage endpoint, never from what the user typed.
-- **`~/.codex` is MaPa's interactive login and is never moved, symlinked or registered.** Only
-  `config.toml` is shared into a newly created home, by symlink.
+- **Only the Codex proxy writes `auth.json`, and only like this** (`refreshCodexAuth`). A pooled
+  home codex is not running in is never refreshed otherwise, so the proxy refreshes the homes it
+  sends with:
+  - only when the access token is expired or within 5 minutes of its JWT `exp`, or after an
+    upstream 401 for that account;
+  - under an exclusive flock on `.vibemon-refresh.lock` in that home, re-reading `auth.json` inside
+    the lock first: when the token changed meanwhile (codex refreshed), that one is used and nothing
+    is refreshed;
+  - exactly as codex 0.163.0 does it (`login/src/auth/manager.rs`): `POST
+    https://auth.openai.com/oauth/token`, JSON `{client_id, grant_type: refresh_token,
+    refresh_token}`, client id `app_EMoamEEZ73f0CkXaXp7hrann`;
+  - written atomically (temp file in the same directory, 0600, rename) as a read-modify-write that
+    keeps every field it does not own exactly as it was and sets only the tokens the endpoint
+    returned and `last_refresh`;
+  - a 400, 401 or 403 from the refresh is re-auth (rule 4): that account is benched for a day and the
+    proxy moves on.
+
+  The usage poll and `exec` still never refresh: the poll runs every tick for every account, and
+  codex itself neither locks nor writes atomically, so every refresh is a rotation a running codex
+  could race. The email and plan always come from the usage endpoint, never from what the user
+  typed.
+- **`~/.codex` is MaPa's interactive login and is never moved, symlinked, registered or
+  refreshed.** It is not a pooled account: the proxy never sends with it, and `refreshCodexAuth`
+  refuses it outright. Only `config.toml` is shared into a newly created home, by symlink, which is
+  why the proxy's `openai_base_url` belongs in a profile (`~/.codex/vibemon.config.toml`), never at
+  the top of that file.
 - Rule 4 applies unchanged: a 401 or 403 from `wham/usage` is re-auth, a 429 is back off.
 - `remove` forgets the vault entry and keeps the home; deleting the directory is what logs the
   account out, and the message says so.
@@ -67,7 +88,7 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 | `keychain.go` | `security(1)` wrapper — verified writes |
 | `accounts.go` | vault, account kinds, Claude Code state, switch/capture/forget, plan labels |
 | `api.go` | `/api/oauth/usage`, `/api/oauth/profile`, token refresh |
-| `codex.go` | Codex homes, wham usage, the `codex login` wrapper, child env |
+| `codex.go` | Codex homes, `auth.json` read and refresh, wham usage, the `codex login` wrapper, child env |
 | `gui.go` | systray, panel and settings windows, poll loop |
 | `prefs.go` | prefs.json: display, auto-switch, exec order and per-project account policies |
 | `exec.go` | `vibemon exec`: interactive pass-through or the headless limit-and-resume loop |
@@ -75,6 +96,7 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 | `history.go` | `history.jsonl`: one usage sample per account per poll, feeds the dashboard charts |
 | `web.go` | the dashboard on `127.0.0.1:6660`: columns, rundown charts as server-side SVG, htmx swaps |
 | `proxy.go` | the auth proxy on `127.0.0.1:6661`: every request to Anthropic leaves with the active account's token (read-only, 5 s cache, dropped on a 401) |
+| `codexproxy.go` | the Codex auth proxy on `127.0.0.1:6662`: codex's model traffic leaves with a pooled ChatGPT account (exec's Codex order, sticky until a limit or a dead login), a limit benches and sends the request again on the next account, WebSockets get 426 |
 | `limits.go` | limit message classifier and reset-time parser |
 | `icon.go` | the CRT tray glyph, drawn in code |
 | `main.go` | CLI subcommands and the GUI entrypoint |
@@ -120,8 +142,10 @@ just autostart  # LaunchAgent for login start
 ## Testing
 
 Tests are assert-based `testing`, no frameworks. The ones that matter guard the destructive paths:
-`TestSwapOAuthPreservesEverythingElse` (MCP tokens survive a switch) and
-`TestPatchClaudeJSONTouchesOnlyIdentity` (the 500KB config keeps its 178 project entries).
+`TestSwapOAuthPreservesEverythingElse` (MCP tokens survive a switch),
+`TestPatchClaudeJSONTouchesOnlyIdentity` (the 500KB config keeps its 178 project entries),
+`TestRefreshCodexAuthWritesLikeCodex` (a refresh keeps every `auth.json` field it does not own) and
+`TestRefreshCodexAuthUsesWhatChangedUnderTheLock` (no second rotation of a refresh token).
 Keep those green. `exec_test.go` drives the headless loop against a fake `claude` script; it asserts
 the resume-under-next-account path and that `ANTHROPIC_API_KEY` never reaches a child.
 
@@ -135,7 +159,12 @@ plain `codex exec` in that home would have refreshed it, and `codex add <email>`
 browser login that was not needed); a live account switch followed by
 `/mcp` reconnecting; a parked account surviving past its ~12h token expiry; `exec` against a real
 limit (the classifier's patterns come from the Paloma One runner logs, the fake script in the tests
-replays them); interactive `vibemon exec` behaviour of features that need a full-scope login; and
+replays them); interactive `vibemon exec` behaviour of features that need a full-scope login;
 the auth proxy against the real API (a Claude Code session on `ANTHROPIC_BASE_URL`, SSE through it,
 a switch reaching that session, and whether the session's own refresh of its startup account writes
-that account back over a switch).
+that account back over a switch); and the Codex proxy against the real API. Its routing was checked
+with codex 0.163.0 against local stand-ins only (`openai_base_url` sends `/models` and `/responses`
+to the proxy, `chatgpt_base_url` traffic stays on the own login, a 426 moves codex to HTTP for the
+session); unverified are a real 429 body and the retry on the next account, a refresh at
+auth.openai.com, and whether upstream accepts a conversation's encrypted reasoning items under an
+account other than the one that produced them, which every switch mid-session asks of it.

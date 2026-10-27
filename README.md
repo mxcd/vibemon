@@ -20,6 +20,8 @@ in a click.
   which one has room before you switch to it.
 - **One-click switching.** Sessions on the [auth proxy](#switching-running-sessions-the-auth-proxy)
   follow on their next request; any other picks up the new account on its next start.
+- **Your own codex on pooled ChatGPT accounts** through the [Codex proxy](#your-own-codex-on-the-pooled-accounts-the-codex-proxy),
+  moving to the next account when a limit hits, mid-session.
 - **Auto-rotation** (optional) moves you off an account that is nearly spent, and comes back to your
   preferred account once it recovers.
 - **Re-auth warnings** when an account's refresh token dies.
@@ -174,8 +176,8 @@ vibemon remove --kind codex you@example.com   # forget it; the login in the home
 ```
 
 Usage comes from `GET https://chatgpt.com/backend-api/wham/usage`, read with the access token in
-that home's `auth.json`. vibemon never refreshes those tokens: codex does it itself inside the same
-home. Windows are mapped by their length, not by the slot they arrive in, so a plan that reports
+that home's `auth.json`. The poll never refreshes those tokens: codex does it itself inside the
+same home, and so does the Codex proxy below for a home it sends with. Windows are mapped by their length, not by the slot they arrive in, so a plan that reports
 only a weekly window lands in the weekly gauge. Per-model limits are shown, never acted on.
 
 A Codex review is a single turn, so a limit reruns the whole command under the next account with
@@ -186,6 +188,49 @@ headroom rather than resuming anything; `--model` and `--session` are refused wi
 Order is set per kind on the **Settings** page, next to the Claude one; `vibemon codex add` appends
 a new account to the end of the Codex list, so the order you add them in is the order they fill up
 in. `~/.codex` stays your own interactive login: vibemon never moves, links or registers it.
+
+### Your own codex on the pooled accounts: the Codex proxy
+
+The menu bar app also runs a second proxy on `127.0.0.1:6662` (`vibemon proxy` runs both in the
+foreground; `VIBEMON_CODEX_PROXY_ADDR` moves it). Point codex's model traffic at it, and your own
+`codex`, with your own `~/.codex` login and config, runs on the pooled ChatGPT accounts:
+
+```sh
+codex -c openai_base_url="http://127.0.0.1:6662/backend-api/codex"
+```
+
+or as a profile, which codex 0.163 keeps in a file of its own:
+
+```sh
+echo 'openai_base_url = "http://127.0.0.1:6662/backend-api/codex"' > ~/.codex/vibemon.config.toml
+codex -p vibemon
+```
+
+Keep it out of the top level of `~/.codex/config.toml`: a home made by `vibemon codex add` links
+that file, and the `vibemon exec` runs in it would then leave through the proxy instead of under
+their own account.
+
+Every request leaves with a pooled account's access token and `ChatGPT-Account-Id`, picked in the
+Codex order exec uses (benched and logged-out accounts skipped, spent ones only when nothing else
+is left). The account is sticky, so a session keeps its prompt cache, until it fails:
+
+- **A usage limit** (a 429 from upstream) benches the account in `fleet.json` until the reset it
+  names, as exec does, and the same request goes out again on the next account before codex sees
+  anything. A plain throttle (`rate_limit_exceeded`) passes through; codex backs off by itself.
+- **A rejected token** (401) is refreshed and the request sent again. A refresh the auth server
+  rejects benches that account for a day (`vibemon codex add <email>` logs it in again) and the
+  proxy moves on.
+- **An expiring token** is refreshed before it goes out: within five minutes of its expiry, as
+  codex itself does it, under a lock in that home, re-reading `auth.json` first in case codex
+  already did. `~/.codex` is never refreshed or sent.
+
+Only a request that has not started answering is sent again, and only once; a request body above
+32 MiB is not kept for it. WebSocket upgrades get a 426, which codex answers by using HTTP for the
+rest of the session: a WebSocket stays on the account it opened with and carries a limit inside its
+frames, where no switch reaches it. Only model traffic (`/backend-api/codex/...`) goes through the
+proxy; codex's account check, plugins and MCP calls still use your own login, so `/status` shows
+your own account. With no usable account left the proxy answers 503 and says so; it never falls
+back to your own login.
 
 `vibemon pick --json` carries a `kind` on every row (`claude` or `codex`), so a driver can group
 them:
@@ -231,8 +276,9 @@ parked ones every 20 — the countdowns tick locally in between. A failed fetch 
 with exponential backoff (2 minutes doubling to 30, or whatever `Retry-After` asks for) and the last
 known numbers stay on screen. A 429 is never mistaken for a dead account.
 
-Nothing leaves your machine except the two Anthropic API calls above, and the ChatGPT usage call
-for each Codex account. Preferences live in
+Nothing leaves your machine except the two Anthropic API calls above, the ChatGPT usage call for
+each Codex account, and what you send through the two proxies (plus the Codex proxy's token
+refresh at `auth.openai.com`). Preferences live in
 `~/Library/Application Support/vibemon/prefs.json` and contain no secrets.
 
 ## Development
@@ -252,8 +298,9 @@ mine ends up in the repo.
 ## Caveats
 
 - macOS only. Credential storage differs on Windows and Linux.
-- Built against Claude Code 2.1.219 and codex-cli 0.153.4. Neither usage endpoint is public API,
-  and the keychain layout is not either; both could change under you.
+- Built against Claude Code 2.1.219 and codex-cli 0.153.4, the Codex proxy against codex-cli
+  0.163.0. Neither usage endpoint is public API, and the keychain layout is not either; both could
+  change under you.
 - Wails v3 is still alpha.
 
 ## License
