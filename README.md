@@ -18,19 +18,21 @@ in a click.
   limit when one is in play, each with its reset countdown.
 - **Every account at once.** Parked accounts keep reporting usage in the background, so you know
   which one has room before you switch to it.
-- **One-click switching.** The next Claude Code start picks up the new account.
+- **One-click switching.** Sessions on the [auth proxy](#switching-running-sessions-the-auth-proxy)
+  follow on their next request; any other picks up the new account on its next start.
 - **Auto-rotation** (optional) moves you off an account that is nearly spent, and comes back to your
   preferred account once it recovers.
 - **Re-auth warnings** when an account's refresh token dies.
 
 ### Dashboard
 
-While the menu bar app runs it also serves a dashboard at <http://127.0.0.1:6660>: every account
-as a table, with a column picker for what to show (plan, status, session and weekly windows with
-their reset countdowns, per-model limits, headless turns, credentials, fetch time, errors), and
-rundown charts of each limit over the last 6 hours to 14 days, so you can see a window climb and
-reset rather than only its current number. Both selections are saved. The page is server-rendered
-and refreshes itself every minute; nothing leaves your machine.
+While the menu bar app runs it also serves a dashboard at <http://127.0.0.1:6660> (tray menu:
+*Open dashboard*): every account as a table, with a column picker for what to show (plan, status,
+session and weekly windows with their reset countdowns, per-model limits, headless turns,
+credentials, fetch time, errors), and rundown charts of each limit over the last 6 hours to 14
+days, so you can see a window climb and reset rather than only its current number. Both selections
+are saved. The page is server-rendered and refreshes itself every minute; nothing leaves your
+machine.
 
 Set `VIBEMON_WEB` (for example `127.0.0.1:8080`) to move it. It deliberately is not on 6666, which
 Chrome, Firefox and Safari all refuse as an unsafe port.
@@ -200,9 +202,9 @@ crosses 95% on either window, vibemon moves to the account with the most headroo
 as **Preferred** and vibemon will favour it whenever it has room, and return to it after rotating
 away. Switching accounts by hand clears that intent until you rotate again.
 
-Two honest limits: rotation only affects sessions started *after* it, so it cannot rescue a session
-that is already blocked; and the 95% trigger is a constant in `gui.go` if you want to run closer to
-the edge.
+Two honest limits: rotation only reaches sessions started *after* it or running through the auth
+proxy, so it cannot rescue any other session that is already blocked; and the 95% trigger is a
+constant in `gui.go` if you want to run closer to the edge.
 
 ## How it works
 
