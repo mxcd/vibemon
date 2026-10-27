@@ -127,7 +127,12 @@ func acquireLock(name string) (release func(), err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0o600)
+	return lockFile(filepath.Join(dir, name))
+}
+
+// lockFile takes an exclusive flock on path, waiting for the holder, and records our pid in it.
+func lockFile(path string) (release func(), err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +142,7 @@ func acquireLock(name string) (release func(), err error) {
 			return nil, err
 		}
 		holder, _ := os.ReadFile(f.Name())
-		fmt.Fprintf(os.Stderr, "vibemon: queued behind pid %s on %s\n", strings.TrimSpace(string(holder)), name)
+		fmt.Fprintf(os.Stderr, "vibemon: queued behind pid %s on %s\n", strings.TrimSpace(string(holder)), path)
 		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 			f.Close()
 			return nil, err

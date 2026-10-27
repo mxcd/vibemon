@@ -230,45 +230,14 @@ type tokenResponse struct {
 // keeps them fresh itself; refreshing those from here risks tripping refresh-token rotation and
 // logging the user out of their live session.
 func refreshToken(refresh string) (OAuth, error) {
-	payload, err := json.Marshal(map[string]string{
+	var tr tokenResponse
+	err := postToken(tokenURL, map[string]string{
 		"grant_type":    "refresh_token",
 		"refresh_token": refresh,
 		"client_id":     oauthClientID,
-	})
+	}, &tr)
 	if err != nil {
 		return OAuth{}, err
-	}
-	req, err := http.NewRequest(http.MethodPost, tokenURL, bytes.NewReader(payload))
-	if err != nil {
-		return OAuth{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return OAuth{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return OAuth{}, err
-	}
-	// Only a rejected grant means the account really needs a new login. Throttling and server-side
-	// faults are temporary, and mislabelling them would send the user off to re-authenticate an
-	// account that is perfectly fine.
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		return OAuth{}, &rateLimitError{RetryAfter: retryAfter(resp)}
-	case resp.StatusCode == http.StatusBadRequest,
-		resp.StatusCode == http.StatusUnauthorized,
-		resp.StatusCode == http.StatusForbidden:
-		return OAuth{}, fmt.Errorf("refresh: %w (HTTP %d: %s)", errNeedsReauth, resp.StatusCode, truncate(string(body), 200))
-	case resp.StatusCode != http.StatusOK:
-		return OAuth{}, fmt.Errorf("refresh: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
-	}
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return OAuth{}, fmt.Errorf("refresh: decode response: %w", err)
 	}
 	if tr.AccessToken == "" {
 		return OAuth{}, fmt.Errorf("refresh: response carried no access_token")
@@ -282,6 +251,46 @@ func refreshToken(refresh string) (OAuth, error) {
 		out.RefreshToken = refresh // server did not rotate; keep the one we have
 	}
 	return out, nil
+}
+
+// postToken sends a refresh grant as JSON to an OAuth token endpoint and decodes the 200 answer
+// into into. Only a rejected grant means the account really needs a new login. Throttling and
+// server-side faults are temporary, and mislabelling them would send the user off to
+// re-authenticate an account that is perfectly fine.
+func postToken(url string, grant map[string]string, into any) error {
+	payload, err := json.Marshal(grant)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return &rateLimitError{RetryAfter: retryAfter(resp)}
+	case resp.StatusCode == http.StatusBadRequest,
+		resp.StatusCode == http.StatusUnauthorized,
+		resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("refresh: %w (HTTP %d: %s)", errNeedsReauth, resp.StatusCode, truncate(string(body), 200))
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("refresh: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+	}
+	if err := json.Unmarshal(body, into); err != nil {
+		return fmt.Errorf("refresh: decode response: %w", err)
+	}
+	return nil
 }
 
 func truncate(s string, n int) string {
