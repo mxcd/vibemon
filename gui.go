@@ -29,11 +29,14 @@ const (
 	backoffCap  = 30 * time.Minute
 
 	// Auto-rotation thresholds. 95 rather than 99 on purpose: at 99% the next turn is likely to be
-	// refused mid-flight, and the switch only helps sessions started after it. Raise it here if you
-	// would rather squeeze the last few percent out of an account.
+	// refused mid-flight, and the switch only helps sessions started after it or running through
+	// the auth proxy. Raise it here if you would rather squeeze the last few percent out of an account.
 	autoSwitchAt       = 95.0
 	autoSwitchHeadroom = 80.0 // a candidate must be below this on both windows to be worth moving to
 	autoSwitchCooldown = 5 * time.Minute
+
+	// Appended to every switch notice: only sessions outside the auth proxy hold their token.
+	switchHint = "Sessions on the auth proxy follow now, others after a restart."
 )
 
 type panelAccount struct {
@@ -425,8 +428,8 @@ func (m *monitor) autoRotate() bool {
 					return false
 				}
 				m.lastAutoSwitch, m.roamed = time.Now(), false
-				m.state.Notice = fmt.Sprintf("Back on %s (%.0f%% used). Restart Claude Code to use it.",
-					a.Email, worstOf(a.Usage))
+				m.state.Notice = fmt.Sprintf("Back on %s (%.0f%% used). %s",
+					a.Email, worstOf(a.Usage), switchHint)
 				return true
 			}
 		}
@@ -471,8 +474,8 @@ func (m *monitor) autoRotate() bool {
 	if m.preferred != "" && active.UUID == m.preferred {
 		m.roamed = true
 	}
-	m.state.Notice = fmt.Sprintf("Auto-switched to %s (%.0f%% used). Restart Claude Code to use it.",
-		target.Email, bestScore)
+	m.state.Notice = fmt.Sprintf("Auto-switched to %s (%.0f%% used). %s",
+		target.Email, bestScore, switchHint)
 	return true
 }
 
@@ -546,9 +549,10 @@ func (m *monitor) switchTo(uuid string) {
 		m.notify("switch failed: " + err.Error())
 		return
 	}
-	msg := "Switched to " + target.Email + " — restart Claude Code."
+	msg := "Switched to " + target.Email + ". " + switchHint
 	if running > 0 {
-		msg = fmt.Sprintf("Switched to %s — %d running session(s) keep the old account until restarted.", target.Email, running)
+		msg = fmt.Sprintf("Switched to %s. %d running session(s) keep the old account until restarted, unless on the auth proxy.",
+			target.Email, running)
 	}
 	m.notify(msg)
 	m.poll(true)
