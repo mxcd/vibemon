@@ -350,3 +350,25 @@ func TestClaudeChildEnvDropsProxyBaseURL(t *testing.T) {
 		}
 	}
 }
+
+// The same for codex: an OPENAI_BASE_URL on the Codex proxy would swap the child's own account for
+// the proxy's pick.
+func TestCodexChildEnvDropsProxyBaseURL(t *testing.T) {
+	t.Setenv("VIBEMON_CODEX_PROXY_ADDR", "")
+	cases := []struct {
+		base string
+		keep bool
+	}{
+		{"http://127.0.0.1:6662/backend-api/codex", false},
+		{"http://localhost:6662", false},
+		{"http://127.0.0.1:6661", true}, // the Claude proxy is not codex's business
+		{"https://api.openai.com/v1", true},
+	}
+	for _, tc := range cases {
+		t.Setenv("OPENAI_BASE_URL", tc.base)
+		kept := slices.Contains(codexChildEnv("/homes/a@x.io"), "OPENAI_BASE_URL="+tc.base)
+		if kept != tc.keep {
+			t.Errorf("%s: kept = %v, want %v", tc.base, kept, tc.keep)
+		}
+	}
+}

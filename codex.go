@@ -373,13 +373,21 @@ func codexUsageFor(a *Account) (Usage, error) {
 
 // codexChildEnv hands the child one home. A CODEX_HOME inherited from the caller's shell would
 // override ours, and OPENAI_API_KEY outranks the ChatGPT login: the run would bill the API instead
-// of the plan and never show up in this account's numbers.
+// of the plan and never show up in this account's numbers. An OPENAI_BASE_URL on the Codex proxy
+// goes too, since the proxy would swap this home's account for its own pick; codex 0.163.0 ignores
+// that variable, older builds read it. The proxy's real way in is openai_base_url in a config.toml
+// the home shares with ~/.codex, which is why the README puts it in a profile instead.
 func codexChildEnv(home string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
-		switch strings.SplitN(kv, "=", 2)[0] {
+		key, val, _ := strings.Cut(kv, "=")
+		switch key {
 		case "CODEX_HOME", "OPENAI_API_KEY":
 			continue
+		case "OPENAI_BASE_URL":
+			if viaProxy(val, codexProxyAddr()) {
+				continue
+			}
 		}
 		env = append(env, kv)
 	}

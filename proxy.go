@@ -137,14 +137,14 @@ func newAuthProxy(upstream *url.URL, read func() (proxyCreds, error)) http.Handl
 	})
 }
 
-// viaProxy reports whether an ANTHROPIC_BASE_URL routes through this proxy.
-func viaProxy(base string) bool {
+// viaProxy reports whether a base URL routes through the proxy listening on addr.
+func viaProxy(base, addr string) bool {
 	u, err := url.Parse(base)
 	if err != nil {
 		return false
 	}
-	_, port, _ := net.SplitHostPort(proxyAddr())
-	return u.Port() == port && loopbackHost(u.Host, proxyAddr())
+	_, port, _ := net.SplitHostPort(addr)
+	return u.Port() == port && loopbackHost(u.Host, addr)
 }
 
 // serveProxy runs the auth proxy until its listener fails.

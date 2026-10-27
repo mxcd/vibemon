@@ -539,7 +539,7 @@ func claudeChildEnv(token string) []string {
 		case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN":
 			continue
 		case "ANTHROPIC_BASE_URL":
-			if viaProxy(val) {
+			if viaProxy(val, proxyAddr()) {
 				continue
 			}
 		}
