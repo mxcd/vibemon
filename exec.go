@@ -525,13 +525,19 @@ func (a *Account) childEnv() []string {
 
 // claudeChildEnv hands the child exactly one credential. ANTHROPIC_API_KEY silently outranks the
 // OAuth token and would bill the API instead of the subscription; ANTHROPIC_AUTH_TOKEN would route
-// to a gateway. Both go.
+// to a gateway. Both go. So does a base URL pointing at the auth proxy, inherited from a proxied
+// session: the proxy would swap this account's token for the active one's.
 func claudeChildEnv(token string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
-		switch strings.SplitN(kv, "=", 2)[0] {
+		key, val, _ := strings.Cut(kv, "=")
+		switch key {
 		case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN":
 			continue
+		case "ANTHROPIC_BASE_URL":
+			if viaProxy(val) {
+				continue
+			}
 		}
 		env = append(env, kv)
 	}

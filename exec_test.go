@@ -328,3 +328,25 @@ func TestCodexChildEnv(t *testing.T) {
 		t.Error("unrelated variables must be left alone")
 	}
 }
+
+// A session started through the proxy passes ANTHROPIC_BASE_URL on to exec; the proxy would then
+// swap the child's own account for the active one.
+func TestClaudeChildEnvDropsProxyBaseURL(t *testing.T) {
+	t.Setenv("VIBEMON_PROXY_ADDR", "")
+	cases := []struct {
+		base string
+		keep bool
+	}{
+		{"http://127.0.0.1:6661", false},
+		{"http://localhost:6661/", false},
+		{"http://127.0.0.1:8080", true}, // some other gateway the caller chose
+		{"https://gateway.example", true},
+	}
+	for _, tc := range cases {
+		t.Setenv("ANTHROPIC_BASE_URL", tc.base)
+		kept := slices.Contains(claudeChildEnv("tok"), "ANTHROPIC_BASE_URL="+tc.base)
+		if kept != tc.keep {
+			t.Errorf("%s: kept = %v, want %v", tc.base, kept, tc.keep)
+		}
+	}
+}
