@@ -81,9 +81,27 @@ vibemon remove you@example.com  # forget an account
 vibemon token you@example.com   # print the account's headless token, for scripts
 ```
 
-**Restart Claude Code after a switch.** Running sessions hold their token in memory and keep using
-the old account until they exit; `vibemon switch` tells you how many are running. To carry on the
-same conversation afterwards, `claude -c` continues where you left off.
+**Restart Claude Code after a switch**, unless it runs through the auth proxy below. Running
+sessions hold their token in memory and keep using the old account until they exit; `vibemon
+switch` tells you how many are running. To carry on the same conversation afterwards, `claude -c`
+continues where you left off.
+
+### Switching running sessions: the auth proxy
+
+The menu bar app also runs a local proxy on `127.0.0.1:6661` (`vibemon proxy` runs it in the
+foreground without the app; `VIBEMON_PROXY_ADDR` moves it). Start Claude Code through it:
+
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:6661
+claude
+```
+
+Every request then leaves with the token of whichever account is active right now, so a switch
+reaches sessions that are already running on their next request, no restart. The proxy only reads
+the keychain (cached for 5 seconds, re-read after a 401) and never refreshes a token; if the read
+fails, the session's own credentials go through unchanged. `/status` inside a session still shows
+the email it started with, because Claude Code reads the profile once at startup. `vibemon exec`
+strips this base URL from its children, which run under their own account on purpose.
 
 ## Several projects, several accounts: `vibemon exec`
 

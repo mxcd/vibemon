@@ -74,6 +74,7 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 | `fleet.go` | `fleet.json` ledger (turns, benches, usage cache), flock-based locks, account ranking |
 | `history.go` | `history.jsonl`: one usage sample per account per poll, feeds the dashboard charts |
 | `web.go` | the dashboard on `127.0.0.1:6660`: columns, rundown charts as server-side SVG, htmx swaps |
+| `proxy.go` | the auth proxy on `127.0.0.1:6661`: every request to Anthropic leaves with the active account's token (read-only, 5 s cache, dropped on a 401) |
 | `limits.go` | limit message classifier and reset-time parser |
 | `icon.go` | the CRT tray glyph, drawn in code |
 | `main.go` | CLI subcommands and the GUI entrypoint |
@@ -134,4 +135,7 @@ plain `codex exec` in that home would have refreshed it, and `codex add <email>`
 browser login that was not needed); a live account switch followed by
 `/mcp` reconnecting; a parked account surviving past its ~12h token expiry; `exec` against a real
 limit (the classifier's patterns come from the Paloma One runner logs, the fake script in the tests
-replays them); and interactive `vibemon exec` behaviour of features that need a full-scope login.
+replays them); interactive `vibemon exec` behaviour of features that need a full-scope login; and
+the auth proxy against the real API (a Claude Code session on `ANTHROPIC_BASE_URL`, SSE through it,
+a switch reaching that session, and whether the session's own refresh of its startup account writes
+that account back over a switch).
