@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,11 +122,12 @@ func (a *Account) planLabel() string {
 type Vault map[string]*Account
 
 func loadVault() (Vault, error) {
-	raw, err := keychainRead(vaultService)
+	raw, err := secrets.read(vaultService)
 	if err != nil {
-		// Only a missing item means "no vault yet". Any other failure (locked keychain, prompt
-		// denied) must not read as empty: the next save would replace every stored account.
-		if strings.Contains(err.Error(), "could not be found") {
+		// Only a missing item means "no vault yet": security's "could not be found", or no file on
+		// Linux. Any other failure (locked keychain, prompt denied, unreadable file) must not read as
+		// empty: the next save would replace every stored account.
+		if errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), "could not be found") {
 			return Vault{}, nil
 		}
 		return nil, err
@@ -135,8 +137,8 @@ func loadVault() (Vault, error) {
 		return v, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
-		return nil, fmt.Errorf("vault is corrupt (%w) — discard it with "+
-			"`security delete-generic-password -s %s` and re-run `vibemon capture`", err, vaultService)
+		return nil, fmt.Errorf("vault is corrupt (%w): discard it with %s and re-run `vibemon capture`",
+			err, vaultDiscardHint())
 	}
 	return v, nil
 }
@@ -146,7 +148,7 @@ func saveVault(v Vault) error {
 	if err != nil {
 		return err
 	}
-	return keychainWrite(vaultService, string(blob))
+	return secrets.write(vaultService, string(blob))
 }
 
 func (v Vault) sorted() []*Account {
@@ -166,11 +168,11 @@ func (v Vault) sorted() []*Account {
 
 // --- Claude Code state -------------------------------------------------------
 
-// readCCBlob returns Claude Code's keychain payload as raw keys so that everything we do not
-// understand — most importantly the mcpOAuth map holding every MCP server token — survives a
-// round trip untouched.
+// readCCBlob returns Claude Code's credentials (the keychain item, or .credentials.json on Linux) as
+// raw keys so that everything we do not understand, most importantly the mcpOAuth map holding every
+// MCP server token, survives a round trip untouched.
 func readCCBlob() (map[string]json.RawMessage, error) {
-	raw, err := keychainRead(ccService)
+	raw, err := secrets.read(ccService)
 	if err != nil {
 		return nil, fmt.Errorf("read Claude Code credentials: %w", err)
 	}
@@ -218,10 +220,6 @@ func swapOAuth(blob map[string]json.RawMessage, o OAuth) ([]byte, error) {
 	}
 	next[oauthKey] = encoded
 	return json.Marshal(next)
-}
-
-func claudeJSONPath() string {
-	return filepath.Join(os.Getenv("HOME"), ".claude.json")
 }
 
 // patchClaudeJSON rewrites only oauthAccount and userID, preserving every other key byte-for-byte.
@@ -461,7 +459,7 @@ func switchTo(v Vault, uuid string) error {
 	if err != nil {
 		return err
 	}
-	original, err := keychainRead(ccService)
+	original, err := secrets.read(ccService)
 	if err != nil {
 		return err
 	}
@@ -478,10 +476,10 @@ func switchTo(v Vault, uuid string) error {
 	if err != nil {
 		return err
 	}
-	if err := keychainWrite(ccService, string(next)); err != nil {
-		// keychainWrite verifies before returning, so a failure here means the item may be in an
-		// unknown state. Put back exactly what was there.
-		if restoreErr := keychainWrite(ccService, original); restoreErr != nil {
+	if err := secrets.write(ccService, string(next)); err != nil {
+		// write verifies before returning, so a failure here means the item may be in an unknown
+		// state. Put back exactly what was there.
+		if restoreErr := secrets.write(ccService, original); restoreErr != nil {
 			return fmt.Errorf("switch failed (%w) AND restore failed (%v) — run `claude /login`", err, restoreErr)
 		}
 		return fmt.Errorf("switch failed, previous credentials restored: %w", err)
@@ -500,9 +498,9 @@ func forget(v Vault, uuid string) error {
 	}
 	delete(v, uuid)
 	if len(v) == 0 {
-		// An empty map would round-trip as "{}", which loadVault reads back fine — but dropping the
-		// item entirely leaves no stale secret sitting in the keychain.
-		_ = exec.Command("/usr/bin/security", "delete-generic-password", "-s", vaultService).Run()
+		// An empty map would round-trip as "{}", which loadVault reads back fine, but dropping the
+		// item entirely leaves no stale secret sitting in the keychain or on disk.
+		_ = secrets.remove(vaultService)
 		return nil
 	}
 	return saveVault(v)

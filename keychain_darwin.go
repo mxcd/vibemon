@@ -3,10 +3,33 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
 )
+
+// On macOS both secrets are generic passwords in the login keychain, written through security(1).
+var secrets secretStore = keychain{}
+
+type keychain struct{}
+
+func (keychain) read(service string) (string, error) { return keychainRead(service) }
+
+func (keychain) write(service, secret string) error { return keychainWrite(service, secret) }
+
+func (keychain) remove(service string) error {
+	return exec.Command("/usr/bin/security", "delete-generic-password", "-s", service).Run()
+}
+
+func vaultDiscardHint() string {
+	return "`security delete-generic-password -s " + vaultService + "`"
+}
+
+func claudeJSONPath() string {
+	return filepath.Join(os.Getenv("HOME"), ".claude.json")
+}
 
 // ponytail: shells out to /usr/bin/security rather than binding the Security framework via cgo.
 // Claude Code creates its keychain item through that same binary, so its ACL already trusts it —
