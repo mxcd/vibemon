@@ -64,23 +64,34 @@ func TestFileSecretsReplaceByRename(t *testing.T) {
 }
 
 // Claude Code writes its file 0600; if the user has a reason to set it otherwise, a switch must
-// not quietly change it.
-func TestFileSecretsKeepTheFileMode(t *testing.T) {
-	credentials, _ := secretFiles(t)
-	if err := os.MkdirAll(filepath.Dir(credentials), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(credentials, []byte(ccBlobFixture), 0o600); err != nil {
-		t.Fatal(err)
+// not quietly change it. The vault is ours and goes back to 0600 on every save, whatever it was.
+func TestFileSecretsModes(t *testing.T) {
+	credentials, vault := secretFiles(t)
+	for _, p := range []string{credentials, vault} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Chmod(credentials, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(vault, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := secrets.write(ccService, `{"claudeAiOauth":{}}`); err != nil {
 		t.Fatal(err)
 	}
+	if err := secrets.write(vaultService, `{}`); err != nil {
+		t.Fatal(err)
+	}
 	if got := modeOf(t, credentials); got != 0o640 {
-		t.Errorf("mode %o after a write, want the 640 it had", got)
+		t.Errorf("credentials mode %o after a write, want the 640 it had", got)
+	}
+	if got := modeOf(t, vault); got != 0o600 {
+		t.Errorf("vault mode %o after a save, want 600", got)
 	}
 }
 
@@ -223,5 +234,17 @@ func TestFileSecretsVaultLifecycle(t *testing.T) {
 	}
 	if _, err := loadVault(); err == nil {
 		t.Error("an unreadable vault must be an error, not an empty vault")
+	}
+}
+
+// Forgetting the last account must fail loudly when the vault cannot be deleted: the forgotten
+// account's refresh token would still be on disk.
+func TestFileSecretsForgetReportsAFailedDelete(t *testing.T) {
+	_, vault := secretFiles(t)
+	if err := os.MkdirAll(filepath.Join(vault, "in-the-way"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := forget(Vault{"x": {UUID: "x", Email: "x@x.io"}}, "x"); err == nil {
+		t.Error("a vault that could not be deleted must be an error")
 	}
 }

@@ -19,8 +19,15 @@ func (keychain) read(service string) (string, error) { return keychainRead(servi
 
 func (keychain) write(service, secret string) error { return keychainWrite(service, secret) }
 
+// remove treats an item that is already gone as removed, like fileSecrets does a missing file.
 func (keychain) remove(service string) error {
-	return exec.Command("/usr/bin/security", "delete-generic-password", "-s", service).Run()
+	cmd := exec.Command("/usr/bin/security", "delete-generic-password", "-s", service)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil && !strings.Contains(errb.String(), "could not be found") {
+		return fmt.Errorf("keychain delete %q: %w: %s", service, err, strings.TrimSpace(errb.String()))
+	}
+	return nil
 }
 
 func vaultDiscardHint() string {

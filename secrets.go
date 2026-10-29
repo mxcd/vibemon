@@ -39,17 +39,20 @@ func (f fileSecrets) read(service string) (string, error) {
 	return string(raw), err // the *PathError names the file, and a missing one matches fs.ErrNotExist
 }
 
-// write replaces the file atomically, keeping its mode (0600 when it is new), then reads it back to
-// confirm, in the spirit of rule 2. There is no single-line rule here: that one exists because
-// `security -w` prints a multi-line secret as hex; a file holds its bytes as they are.
+// write replaces the file atomically, then reads it back to confirm, in the spirit of rule 2. The
+// vault is always 0600; Claude Code's file keeps whatever mode it has (it sets 0600 itself), 0600
+// when new. There is no single-line rule here: that one exists because `security -w` prints a
+// multi-line secret as hex; a file holds its bytes as they are.
 func (f fileSecrets) write(service, secret string) error {
 	if secret == "" {
 		return fmt.Errorf("write %s: refusing to store an empty secret", service)
 	}
 	path := f.path(service)
 	mode := os.FileMode(0o600)
-	if st, err := os.Stat(path); err == nil {
-		mode = st.Mode().Perm() // Claude Code sets 0600 on every write; whatever is there now stays
+	if service == ccService {
+		if st, err := os.Stat(path); err == nil {
+			mode = st.Mode().Perm()
+		}
 	}
 	err := os.MkdirAll(filepath.Dir(path), 0o700)
 	if err == nil {

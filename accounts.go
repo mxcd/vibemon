@@ -499,9 +499,9 @@ func forget(v Vault, uuid string) error {
 	delete(v, uuid)
 	if len(v) == 0 {
 		// An empty map would round-trip as "{}", which loadVault reads back fine, but dropping the
-		// item entirely leaves no stale secret sitting in the keychain or on disk.
-		_ = secrets.remove(vaultService)
-		return nil
+		// item entirely leaves no stale secret sitting in the keychain or on disk. A delete that
+		// fails must say so: the forgotten account's refresh token would still be there.
+		return secrets.remove(vaultService)
 	}
 	return saveVault(v)
 }
