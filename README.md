@@ -8,6 +8,9 @@ you stand is to type `/usage` inside a running session. vibemon puts those numbe
 watches every account you own — not just the one you are signed into — and swaps the active account
 in a click.
 
+On Linux it runs headless: the same CLI, proxies, usage monitor and dashboard, without the menu bar
+(see [Linux](#linux-headless)).
+
 <p align="center">
   <img src="docs/panel.png" alt="The vibemon panel: session, weekly and per-model gauges over a list of accounts" width="360">
 </p>
@@ -66,6 +69,58 @@ just autostart    # installs a LaunchAgent; logs land in ~/Library/Logs/vibemon.
 just no-autostart # undo
 ```
 
+## Linux (headless)
+
+Everything but the menu bar: `capture`, `list`, `switch`, `usage`, `remove`, `add-token`, `token`,
+`pick`, `exec` (including `--kind codex`), `codex add` and `proxy` work as on the Mac, and a bare
+`vibemon` runs what the menu bar app runs behind its tray, in the foreground: both auth proxies, the
+usage monitor that keeps `fleet.json` and the history fresh, and the dashboard on
+<http://127.0.0.1:6660>. It needs Go 1.26+ and just to build, no cgo and no GTK.
+
+Claude Code has no keychain on Linux, so neither does vibemon:
+
+| | macOS | Linux |
+|---|---|---|
+| Claude Code's login | keychain item `Claude Code-credentials` | `~/.claude/.credentials.json` |
+| vibemon's accounts | keychain item `vibemon-accounts` | `~/.config/vibemon/vault.json`, 0600 |
+| prefs, fleet ledger, history | `~/Library/Application Support/vibemon/` | `~/.config/vibemon/`, 0700 |
+
+`VIBEMON_STATE` moves the state dir on both, the vault with it on Linux. With `CLAUDE_CONFIG_DIR`
+set, Claude Code keeps `.credentials.json` and `.claude.json` in that directory, and vibemon follows
+it there; set it for the unit too if you use it. The vault holds every stored account's refresh
+token, protected by its mode like Claude Code's own file: keep `~/.config/vibemon` out of dotfile
+repos and backups that leave the machine.
+
+Setting up a headless box over SSH:
+
+```sh
+git clone git@github.com:mxcd/vibemon.git && cd vibemon
+just autostart              # build, install to ~/.local/bin, enable a systemd --user unit
+loginctl enable-linger      # once, so the unit starts at boot rather than at your first login
+
+claude auth login           # sign in as an account; it prints a URL to open on any machine
+vibemon capture             # repeat both lines per account
+vibemon list
+
+journalctl --user -u vibemon -f   # the proxies, the monitor and every notice an auto-switch raises
+```
+
+Then start Claude Code on the box through the auth proxy, as on the Mac:
+
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:6661
+```
+
+`just install` swaps the binary and restarts the unit, `just no-autostart` removes it,
+`just reset-vault` deletes the vault file. The dashboard is loopback only; reach it with
+`ssh -L 6660:127.0.0.1:6660 <box>` and <http://localhost:6660>.
+
+What the menu bar's windows set lives in `~/.config/vibemon/prefs.json` instead, edited by hand:
+`autoSwitch` and `preferred` (restart the unit after changing those two), `order`, `codexOrder` and
+`projects` (`[{"path": "~/github.com/org/repo", "accounts": [...]}]`, read on every poll). Accounts
+are named by their vault key, which `jq 'map_values(.email)' ~/.config/vibemon/vault.json` lists.
+Headless tokens go in with `vibemon add-token`.
+
 ## Getting your accounts in
 
 vibemon never performs a login itself — it captures whatever Claude Code is already signed into.
@@ -102,7 +157,8 @@ claude
 
 Every request then leaves with the token of whichever account is active right now, so a switch
 reaches sessions that are already running on their next request, no restart. The proxy only reads
-the keychain (cached for 5 seconds, re-read after a 401) and never refreshes a token; if the read
+the keychain, or the credentials file on Linux (cached for 5 seconds, re-read after a 401), and
+never refreshes a token; if the read
 fails, the session's own credentials go through unchanged. `/status` inside a session still shows
 the email it started with, because Claude Code reads the profile once at startup. `vibemon exec`
 strips this base URL from its children, which run under their own account on purpose.
@@ -249,7 +305,10 @@ away. Switching accounts by hand clears that intent until you rotate again.
 
 Two honest limits: rotation only reaches sessions started *after* it or running through the auth
 proxy, so it cannot rescue any other session that is already blocked; and the 95% trigger is a
-constant in `gui.go` if you want to run closer to the edge.
+constant in `monitor.go` if you want to run closer to the edge.
+
+On Linux there is no tray menu: set `"autoSwitch": true` (and `"preferred"`) in `prefs.json` and
+restart the unit.
 
 ## How it works
 
@@ -259,7 +318,9 @@ from, authenticated with the OAuth token Claude Code already holds. Account iden
 
 Accounts live in your login keychain under `vibemon-accounts`. Switching rewrites the `claudeAiOauth`
 key inside Claude Code's own keychain item (`Claude Code-credentials`) and patches `oauthAccount` and
-`userID` in `~/.claude.json`.
+`userID` in `~/.claude.json`. On Linux the two items are files (see [Linux](#linux-headless)), written
+the way Claude Code writes its own: a temp file in the same directory, synced, renamed over the old
+one, keeping its mode.
 
 Properties this is careful about, because getting them wrong is silent and expensive:
 
@@ -267,7 +328,8 @@ Properties this is careful about, because getting them wrong is silent and expen
   authorised. Only the `claudeAiOauth` key is ever replaced; everything else passes through
   untouched, and a test asserts it.
 - **Every keychain write is verified.** `security(1)` reports success even when it stored nothing
-  useful, so each write is read back and compared before it counts.
+  useful, so each write is read back and compared before it counts. The Linux files are read back
+  too.
 - **The active account's token is never refreshed by vibemon.** Claude Code owns it; refreshing it
   from outside risks invalidating the session you are sitting in. Only parked accounts get refreshed.
 
@@ -279,7 +341,8 @@ known numbers stay on screen. A 429 is never mistaken for a dead account.
 Nothing leaves your machine except the two Anthropic API calls above, the ChatGPT usage call for
 each Codex account, and what you send through the two proxies (plus the Codex proxy's token
 refresh at `auth.openai.com`). Preferences live in
-`~/Library/Application Support/vibemon/prefs.json` and contain no secrets.
+`~/Library/Application Support/vibemon/prefs.json` (`~/.config/vibemon/prefs.json` on Linux) and
+contain no secrets.
 
 ## Development
 
@@ -297,10 +360,11 @@ mine ends up in the repo.
 
 ## Caveats
 
-- macOS only. Credential storage differs on Windows and Linux.
+- macOS, and Linux without the menu bar. Not Windows.
 - Built against Claude Code 2.1.219 and codex-cli 0.153.4, the Codex proxy against codex-cli
-  0.163.0. Neither usage endpoint is public API, and the keychain layout is not either; both could
-  change under you.
+  0.163.0; the Linux credentials file was read off the Claude Code 2.1.312 linux-x64 build. Neither
+  usage endpoint is public API, and the keychain and file layouts are not either; both could change
+  under you.
 - Wails v3 is still alpha.
 
 ## License

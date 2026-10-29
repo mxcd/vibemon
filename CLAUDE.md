@@ -1,6 +1,7 @@
 # vibemon
 
-macOS menu bar app that shows Claude Code usage limits and switches between Claude accounts.
+macOS menu bar app that shows Claude Code usage limits and switches between Claude accounts; on
+Linux the same binary runs headless (CLI, proxies, monitor, dashboard; no menu bar).
 Go + Wails v3, single binary, plain HTML/CSS panel — no npm, no frontend build step.
 
 ## Read this before touching credentials
@@ -41,6 +42,30 @@ concurrently would race the rotation, so usage numbers for picking come from the
 Related: shell out to `/usr/bin/security` rather than calling `SecItem*` via cgo. Claude Code
 created the keychain item through that same binary, so its ACL already trusts it and reads/writes
 never prompt. A native call from our own binary is a different app and may raise a prompt.
+
+## Linux: files instead of the keychain
+
+Both secrets go through `secretStore` (`secrets.go`): the keychain on macOS, `fileSecrets` on Linux.
+What Claude Code does there was read off its 2.1.312 linux-x64 build, not guessed: the store is
+file-only, `<config dir>/.credentials.json` with the config dir `CLAUDE_CONFIG_DIR` or `~/.claude`,
+the same JSON as the keychain value (`claudeAiOauth`, `mcpOAuth`, ...), written 0600 through a temp
+file and a rename, and dropped from its cache when the file's mtime changes.
+
+- **Rules 1 and 3 hold unchanged**: same blob, same read-modify-write of `claudeAiOauth` only.
+- **Rule 2 becomes**: write a temp file in the same directory, sync, keep the old file's mode (0600
+  when new), rename, read back and compare. No single-line rule: that was `security -w` printing a
+  multi-line secret as hex, and `switchTo`'s restore must be able to put back the exact bytes Claude
+  Code wrote, pretty-printed or not.
+- **Missing means empty, nothing else does**: only `fs.ErrNotExist` reads as "no vault yet".
+- **`CLAUDE_CONFIG_DIR` moves both files** (`.credentials.json` and `.claude.json`), so Linux follows
+  it for both; macOS ignores it, where it would also rename the keychain item.
+- The vault is `stateDir()/vault.json` (`~/.config/vibemon`, created 0700). Nothing but vault.lock
+  guards the files: every read-modify-write of either secret already runs under it, and the rename
+  keeps readers whole. Claude Code's own lock (`<config dir>/.storage-write.lock`, proper-lockfile) is
+  not taken, so a token refresh landing inside a switch's read-to-write window can still lose one of
+  the two writes, as on macOS.
+- A bare `vibemon` is `headless_linux.go`: `monitor.run()` without Wails, notices to the journal.
+  Wails needs cgo and GTK on Linux, so `gui.go` and `icon.go` are `//go:build darwin`.
 
 ## Codex accounts
 
@@ -85,11 +110,15 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 
 | File | Holds |
 |---|---|
-| `keychain.go` | `security(1)` wrapper — verified writes |
+| `secrets.go` | `secretStore`, and `fileSecrets`, the Linux store: atomic, mode-keeping, verified writes |
+| `keychain_darwin.go` | `security(1)` wrapper, verified writes: the macOS store |
+| `secrets_linux.go` | Linux paths: `.credentials.json`, `.claude.json` (both after `CLAUDE_CONFIG_DIR`), the vault file |
 | `accounts.go` | vault, account kinds, Claude Code state, switch/capture/forget, plan labels |
 | `api.go` | `/api/oauth/usage`, `/api/oauth/profile`, token refresh |
 | `codex.go` | Codex homes, `auth.json` read and refresh, wham usage, the `codex login` wrapper, child env |
-| `gui.go` | systray, panel and settings windows, poll loop |
+| `monitor.go` | the poll loop, auto-rotation, backoff and the state every view renders |
+| `gui.go` | macOS only: systray, panel and settings windows around a monitor |
+| `headless_linux.go` | a bare `vibemon` on Linux: proxies, monitor and dashboard in the foreground |
 | `prefs.go` | prefs.json: display, auto-switch, exec order and per-project account policies |
 | `exec.go` | `vibemon exec`: interactive pass-through or the headless limit-and-resume loop |
 | `fleet.go` | `fleet.json` ledger (turns, benches, usage cache), flock-based locks, account ranking |
@@ -98,15 +127,16 @@ ChatGPT logins are a second account kind and share none of the Claude machinery.
 | `proxy.go` | the auth proxy on `127.0.0.1:6661`: every request to Anthropic leaves with the active account's token (read-only, 5 s cache, dropped on a 401) |
 | `codexproxy.go` | the Codex auth proxy on `127.0.0.1:6662`: codex's model traffic leaves with a pooled ChatGPT account (exec's Codex order, sticky until a limit or a dead login), a limit benches and sends the request again on the next account, WebSockets get 426 |
 | `limits.go` | limit message classifier and reset-time parser |
-| `icon.go` | the CRT tray glyph, drawn in code |
-| `main.go` | CLI subcommands and the GUI entrypoint |
+| `icon.go` | macOS only: the CRT tray glyph, drawn in code |
+| `main.go` | CLI subcommands and the app entrypoint |
 | `frontend/index.html` | the whole panel: markup, CSS and JS in one file |
 | `frontend/settings.html` | the settings window: tokens, default order, per-project account lists |
 | `web/index.html` | the dashboard template (`page` and `view`), CSS included; `web/htmx.min.js` is vendored |
 
 State lives in four places: Claude Code's keychain item (its own credentials), `vibemon-accounts`
 (our vault of stored accounts, including headless tokens), and under
-`~/Library/Application Support/vibemon/` (`VIBEMON_STATE` overrides it): `prefs.json` (display,
+`~/Library/Application Support/vibemon/` (`~/.config/vibemon/` on Linux, where `vault.json` sits
+too; `VIBEMON_STATE` overrides it): `prefs.json` (display,
 auto-switch, exec policies, the dashboard's column selection, never secrets), `fleet.json` (turns,
 benches, usage cache, written under a flock by every exec and by the monitor) and `history.jsonl`
 (usage samples, appended by every poll, compacted by size to 14 days).
@@ -136,13 +166,23 @@ just run        # build and launch the menu bar app
 just icon       # render the tray glyph and open it — the only way to judge icon.go
 just web-preview # render the dashboard with seeded data and open it in the browser
 just install    # build to ~/.local/bin
-just autostart  # LaunchAgent for login start
+just autostart  # LaunchAgent for login start; on Linux a systemd --user unit (Restart=always)
+```
+
+`install`, `autostart`, `no-autostart` and `reset-vault` have a `[linux]` twin; `icon` and
+`web-preview` are `[macos]` only. Check a Linux change from the Mac with
+`GOOS=linux CGO_ENABLED=0 go vet ./...` and run the tests in a container (`secrets_linux_test.go`
+only runs there):
+
+```sh
+docker run --rm -v "$PWD":/src -w /src golang:1.26 go test -race ./...
 ```
 
 ## Testing
 
 Tests are assert-based `testing`, no frameworks. The ones that matter guard the destructive paths:
 `TestSwapOAuthPreservesEverythingElse` (MCP tokens survive a switch),
+`TestFileSecretsSwitchKeepsMCPOAuth` (the same through the whole Linux file path, on any OS),
 `TestPatchClaudeJSONTouchesOnlyIdentity` (the 500KB config keeps its 178 project entries),
 `TestRefreshCodexAuthWritesLikeCodex` (a refresh keeps every `auth.json` field it does not own) and
 `TestRefreshCodexAuthUsesWhatChangedUnderTheLock` (no second rotation of a refresh token).
@@ -162,9 +202,16 @@ limit (the classifier's patterns come from the Paloma One runner logs, the fake 
 replays them); interactive `vibemon exec` behaviour of features that need a full-scope login;
 the auth proxy against the real API (a Claude Code session on `ANTHROPIC_BASE_URL`, SSE through it,
 a switch reaching that session, and whether the session's own refresh of its startup account writes
-that account back over a switch); and the Codex proxy against the real API. Its routing was checked
+that account back over a switch: the 2.1.312 bundle says no, its refresh save is a compare-and-swap
+on the stored refresh token that adopts a newer write instead, but nobody has watched it happen);
+and the Codex proxy against the real API. Its routing was checked
 with codex 0.163.0 against local stand-ins only (`openai_base_url` sends `/models` and `/responses`
 to the proxy, `chatgpt_base_url` traffic stays on the own login, a 426 moves codex to HTTP for the
 session); unverified are a real 429 body and the retry on the next account, a refresh at
 auth.openai.com, and whether upstream accepts a conversation's encrypted reasoning items under an
 account other than the one that produced them, which every switch mid-session asks of it.
+Linux has only run in a `golang` container (tests, and an offline smoke of the CLI round trip and a
+headless start): unverified are a real `claude auth login` plus `capture` on a Linux box, the systemd
+unit under linger, and when a session off the proxy notices a switched `.credentials.json` (the
+bundle drops its cached token on an mtime change, but when a running session checks is not known,
+so the restart advice stands).
