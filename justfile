@@ -78,4 +78,4 @@ no-autostart:
 # Forget every stored account. Does not touch Claude Code's own credentials.
 reset-vault:
     -security delete-generic-password -s vibemon-accounts
-    @echo "vault cleared — run `vibemon capture` to re-add accounts"
+    @echo 'vault cleared: run vibemon capture to re-add accounts'
