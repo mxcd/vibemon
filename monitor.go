@@ -196,7 +196,7 @@ func (m *monitor) poll(includeParked bool) {
 }
 
 // pollOnce refreshes usage for the active account every tick and for parked accounts far less
-// often — each parked poll may burn a token refresh, and their numbers barely move while unused.
+// often: each parked poll may burn a token refresh, and their numbers barely move while unused.
 // It reports whether it auto-switched accounts.
 func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	m.mu.Lock()
@@ -215,7 +215,7 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 	saved := loadPrefs()
 	m.order, m.codexOrder, m.projects = saved.Order, saved.CodexOrder, saved.Projects
 	if len(v) == 0 {
-		m.state = panelState{Notice: "No accounts yet — log in with Claude Code, then Capture.", UpdatedAt: time.Now()}
+		m.state = panelState{Notice: "No accounts yet: log in with Claude Code, then Capture (vibemon capture).", UpdatedAt: time.Now()}
 		m.publish()
 		return false
 	}
@@ -260,7 +260,7 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 		case waiting:
 			// Still serving a backoff: show the last good numbers rather than hammering the API.
 			pa.Usage = previous[a.UUID]
-			pa.Error = fmt.Sprintf("%s — retrying in %s", state.reason,
+			pa.Error = fmt.Sprintf("%s, retrying in %s", state.reason,
 				time.Until(state.until).Round(time.Second))
 		// A Codex poll is a plain GET that refreshes nothing, and these numbers drive the rotation
 		// of every headless review, so they are refreshed on every tick rather than the parked one.
@@ -269,7 +269,7 @@ func (m *monitor) pollOnce(includeParked bool) (switched bool) {
 			if err != nil {
 				wait := m.penalise(a.UUID, err)
 				pa.Usage = previous[a.UUID] // keep the last good numbers on screen
-				pa.Error = fmt.Sprintf("%s — retrying in %s",
+				pa.Error = fmt.Sprintf("%s, retrying in %s",
 					truncate(err.Error(), 90), wait.Round(time.Second))
 			} else {
 				delete(m.backoff, a.UUID)
@@ -304,7 +304,7 @@ func worstOf(u *Usage) float64 {
 
 // autoRotate moves to a fresher account once the active one is nearly spent. Caller must hold m.mu.
 //
-// This only changes which account the *next* Claude Code start uses — running sessions hold their
+// This only changes which account the *next* Claude Code start uses: running sessions hold their
 // token in memory and are unaffected, so rotation cannot rescue a session that is already blocked.
 func (m *monitor) autoRotate() bool {
 	if !m.autoSwitch || time.Since(m.lastAutoSwitch) < autoSwitchCooldown {
