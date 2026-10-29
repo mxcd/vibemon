@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,8 +15,8 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		if err := runGUI(); err != nil {
-			fatal(err)
+		if err := runApp(); err != nil {
+			log.Fatalf("vibemon: %v", err)
 		}
 		return
 	}
