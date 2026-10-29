@@ -12,8 +12,7 @@ import (
 // must rewrite two identity keys and leave every one of those bytes alone — losing `projects` would
 // wipe the user's per-directory Claude Code history.
 func TestPatchClaudeJSONTouchesOnlyIdentity(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := sandbox(t)
 	path := filepath.Join(home, ".claude.json")
 
 	const before = `{
@@ -86,7 +85,7 @@ func TestPatchClaudeJSONTouchesOnlyIdentity(t *testing.T) {
 
 // A missing file is normal on a fresh machine; Claude Code recreates it on next start.
 func TestPatchClaudeJSONMissingFileIsNotAnError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	sandbox(t)
 	if err := patchClaudeJSON(&Account{UserID: "x"}); err != nil {
 		t.Errorf("want nil for a missing file, got %v", err)
 	}
@@ -94,8 +93,7 @@ func TestPatchClaudeJSONMissingFileIsNotAnError(t *testing.T) {
 
 // Never half-write a corrupt config: bail out and leave the original in place.
 func TestPatchClaudeJSONRefusesCorruptFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := sandbox(t)
 	path := filepath.Join(home, ".claude.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)

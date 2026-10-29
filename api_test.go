@@ -127,7 +127,7 @@ func TestBenchedExpires(t *testing.T) {
 // vibemon codex add writes the Codex order while the menu bar app is running; a tray toggle must
 // not save its own stale copy back over it.
 func TestMonitorPrefsKeepsOrdersWrittenBehindItsBack(t *testing.T) {
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	if err := savePrefs(prefs{Order: []string{"a"}, CodexOrder: []string{"codex:x@x.io"},
 		Projects: []projectPolicy{{Path: "/p", Accounts: []string{"a"}}}}); err != nil {
 		t.Fatal(err)

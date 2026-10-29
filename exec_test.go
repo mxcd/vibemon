@@ -27,8 +27,7 @@ type fakeRun struct {
 
 func setupFake(t *testing.T, lines ...string) fakeRun {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("VIBEMON_STATE", filepath.Join(dir, "state"))
+	dir := sandbox(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api-must-not-leak")
 	t.Setenv("OPENAI_API_KEY", "sk-must-not-leak")
 	f := fakeRun{dir: dir, log: filepath.Join(dir, "log"), script: filepath.Join(dir, "script")}

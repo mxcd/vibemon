@@ -9,10 +9,8 @@ import (
 // the config dir being CLAUDE_CONFIG_DIR or ~/.claude. Following one but not the other would switch
 // the tokens of one setup and the identity of another.
 func TestLinuxPathsFollowClaudeConfigDir(t *testing.T) {
-	home, state := t.TempDir(), t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("VIBEMON_STATE", state)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := sandbox(t)
+	state := filepath.Join(home, "state")
 	cases := []struct{ got, want string }{
 		{secretPath(ccService), filepath.Join(home, ".claude", ".credentials.json")},
 		{claudeJSONPath(), filepath.Join(home, ".claude.json")},

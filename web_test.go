@@ -12,7 +12,7 @@ import (
 
 func webFixture(t *testing.T) *monitor {
 	t.Helper()
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	now := time.Now()
 	in5h, in3d := now.Add(5*time.Hour), now.Add(3*24*time.Hour)
 	return &monitor{state: panelState{UpdatedAt: now, Accounts: []panelAccount{

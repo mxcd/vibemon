@@ -437,8 +437,7 @@ func TestRefreshCodexAuthClassifiesFailures(t *testing.T) {
 
 // ~/.codex is MaPa's own login: no code path may refresh it, whatever home it is handed.
 func TestRefreshCodexAuthNeverTouchesTheOwnLogin(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	own := filepath.Join(os.Getenv("HOME"), ".codex")
+	own := filepath.Join(sandbox(t), ".codex")
 	stale := fakeJWT("own", time.Now())
 	path := writeCodexAuth(t, own, stale)
 	before, _ := os.ReadFile(path)

@@ -188,7 +188,7 @@ func TestAccountOrderFallsBackToEveryone(t *testing.T) {
 }
 
 func TestFleetLedgerRoundTripAndPruning(t *testing.T) {
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	old := time.Now().Add(-25 * time.Hour)
 	st, err := updateFleet(func(st *fleetState) {
 		st.Turns = append(st.Turns,
@@ -217,7 +217,7 @@ func TestFleetLedgerRoundTripAndPruning(t *testing.T) {
 }
 
 func TestLockSerialisesAndReleases(t *testing.T) {
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	release, err := acquireLock("session-1")
 	if err != nil {
 		t.Fatal(err)

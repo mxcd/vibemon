@@ -8,7 +8,7 @@ import (
 )
 
 func TestHistoryRoundTrip(t *testing.T) {
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	now := time.Now()
 	old := map[string]Usage{"a": {Session: Gauge{Label: "Session", Percent: 10}, Weekly: Gauge{Label: "Weekly", Percent: 5}}}
 	fresh := map[string]Usage{

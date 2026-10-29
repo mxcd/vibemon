@@ -64,7 +64,7 @@ func (c *clock) add(d time.Duration) {
 // pool and now replace the vault, the real homes and the clock.
 func codexProxyTo(t *testing.T, upstream http.HandlerFunc, pool func() ([]codexAccount, error), now func() time.Time) string {
 	t.Helper()
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	t.Setenv("VIBEMON_CODEX_PROXY_ADDR", "")
 	up := httptest.NewServer(upstream)
 	t.Cleanup(up.Close)
@@ -421,7 +421,7 @@ func TestCodexProxyGuards(t *testing.T) {
 // The pool is exec's ranking: its order, benches and logins, with spent accounts marked rather
 // than dropped.
 func TestCodexPoolFollowsExecRanking(t *testing.T) {
-	t.Setenv("VIBEMON_STATE", t.TempDir())
+	sandbox(t)
 	codexHomes(t, "x@x.io", "y@x.io") // z is in the vault but never logged in
 	v := testVault()
 	v["codex:z@x.io"] = &Account{UUID: "codex:z@x.io", Email: "z@x.io", Kind: kindCodex}
