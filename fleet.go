@@ -62,7 +62,7 @@ func readFleet() fleetState {
 
 // updateFleet applies fn to the ledger under an exclusive lock and writes it back atomically.
 func updateFleet(fn func(*fleetState)) (fleetState, error) {
-	if err := os.MkdirAll(stateDir(), 0o755); err != nil {
+	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
 		return fleetState{}, err
 	}
 	lock, err := os.OpenFile(fleetPath()+".lock", os.O_CREATE|os.O_RDWR, 0o600)
@@ -124,7 +124,7 @@ func (st *fleetState) benched(key string) (benchEntry, bool) {
 // file: a crashed holder's lock evaporates with its file descriptor, so there is nothing to reclaim.
 func acquireLock(name string) (release func(), err error) {
 	dir := filepath.Join(stateDir(), "locks")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	return lockFile(filepath.Join(dir, name))
@@ -167,7 +167,7 @@ func sessionLockName(sid string) string {
 // lockVault serialises vault read-modify-write cycles across processes: the menu bar app polls
 // and saves while a CLI command may be adding a token. Callers hold it around load and save.
 func lockVault() func() {
-	_ = os.MkdirAll(stateDir(), 0o755)
+	_ = os.MkdirAll(stateDir(), 0o700)
 	f, err := os.OpenFile(filepath.Join(stateDir(), "vault.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return func() {}

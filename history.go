@@ -34,7 +34,7 @@ func recordHistory(polled map[string]Usage, now time.Time) error {
 	if len(polled) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(stateDir(), 0o755); err != nil {
+	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(historyPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
