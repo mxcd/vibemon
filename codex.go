@@ -216,7 +216,7 @@ func refreshCodexAuth(home, stale string, now time.Time) (codexAuth, error) {
 	if err != nil {
 		return a, fmt.Errorf("%s/auth.json: %w", home, err)
 	}
-	if err := writeFileAtomic(path, next); err != nil {
+	if err := writeFileAtomic(path, next, 0o600); err != nil {
 		return a, err
 	}
 	return parseCodexAuth(home, next)

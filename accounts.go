@@ -254,25 +254,29 @@ func patchClaudeJSON(a *Account) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, next)
+	return writeFileAtomic(path, next, 0o600)
 }
 
-// writeFileAtomic replaces path with data, 0600, through a temp file in the same directory and a
-// rename, so a reader never sees a half-written file and a crash mid-write cannot truncate it.
-func writeFileAtomic(path string, data []byte) error {
+// writeFileAtomic replaces path with data through a temp file in the same directory, synced before
+// the rename, so a reader never sees a half-written file and a crash mid-write leaves either the old
+// file or the new one, never a truncated one.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".vibemon-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(mode)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err == nil {
+		err = tmp.Sync()
 	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
