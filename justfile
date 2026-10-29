@@ -2,6 +2,7 @@ bin := "vibemon"
 prefix := env_var('HOME') / ".local/bin"
 plist := env_var('HOME') / "Library/LaunchAgents/com.mxcd.vibemon.plist"
 unit := config_directory() / "systemd/user/vibemon.service"
+state := env('VIBEMON_STATE', config_directory() / "vibemon") # stateDir() on Linux
 
 # Matches the SDK the Wails objc files are built against; without it the linker warns on every build.
 export MACOSX_DEPLOYMENT_TARGET := "26.0"
@@ -81,6 +82,8 @@ no-autostart:
     -rm -f {{plist}}
     @echo "autostart removed"
 
+# Quit the menu bar app first: a poll in flight would save the vault it loaded straight back.
+
 # Forget every stored account. Does not touch Claude Code's own credentials.
 [macos]
 reset-vault:
@@ -125,8 +128,11 @@ no-autostart:
     -systemctl --user daemon-reload
     @echo "autostart removed"
 
+# Runs under vault.lock (flock(1), the lock every vibemon vault write holds), so a poll in flight
+# cannot save the vault it loaded straight back.
+
 # Forget every stored account (the vault file). Claude Code's own credentials file is not touched.
 [linux]
 reset-vault:
-    rm -f "{{env('VIBEMON_STATE', config_directory() / 'vibemon')}}/vault.json"
+    if [ -d "{{state}}" ]; then flock "{{state}}/vault.lock" rm -f "{{state}}/vault.json"; fi
     @echo 'vault cleared: run vibemon capture to re-add accounts'
