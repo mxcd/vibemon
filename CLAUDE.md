@@ -52,20 +52,27 @@ the same JSON as the keychain value (`claudeAiOauth`, `mcpOAuth`, ...), written 
 file and a rename, and dropped from its cache when the file's mtime changes.
 
 - **Rules 1 and 3 hold unchanged**: same blob, same read-modify-write of `claudeAiOauth` only.
-- **Rule 2 becomes**: write a temp file in the same directory, sync, keep the old file's mode (0600
-  when new), rename, read back and compare. No single-line rule: that was `security -w` printing a
-  multi-line secret as hex, and `switchTo`'s restore must be able to put back the exact bytes Claude
-  Code wrote, pretty-printed or not.
+- **Rule 2 becomes**: write a temp file in the same directory, sync, rename, read back and compare.
+  `.credentials.json` keeps its mode (0600 when new), the vault is always 0600. No single-line rule:
+  that was `security -w` printing a multi-line secret as hex, and `switchTo`'s restore must be able
+  to put back the exact bytes Claude Code wrote, pretty-printed or not.
+- **A symlinked `.credentials.json` is not supported**: the rename replaces the link with a regular
+  file.
 - **Missing means empty, nothing else does**: only `fs.ErrNotExist` reads as "no vault yet".
 - **`CLAUDE_CONFIG_DIR` moves both files** (`.credentials.json` and `.claude.json`), so Linux follows
   it for both; macOS ignores it, where it would also rename the keychain item.
 - The vault is `stateDir()/vault.json` (`~/.config/vibemon`, created 0700). Nothing but vault.lock
-  guards the files: every read-modify-write of either secret already runs under it, and the rename
-  keeps readers whole. Claude Code's own lock (`<config dir>/.storage-write.lock`, proper-lockfile) is
-  not taken, so a token refresh landing inside a switch's read-to-write window can still lose one of
-  the two writes, as on macOS.
+  guards the files: every read-modify-write of either secret already runs under it (so does the
+  Linux `just reset-vault`, through flock(1)), and the rename keeps readers whole. Claude Code's own
+  lock (`<config dir>/.storage-write.lock`, proper-lockfile) is not taken, so a token refresh
+  landing inside a switch's read-to-write window can still lose one of the two writes, as on macOS.
 - A bare `vibemon` is `headless_linux.go`: `monitor.run()` without Wails, notices to the journal.
   Wails needs cgo and GTK on Linux, so `gui.go` and `icon.go` are `//go:build darwin`.
+- **Tests never resolve a real path**: `TestMain` (`sandbox_test.go`) points HOME,
+  `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `VIBEMON_STATE` and `VIBEMON_CODEX_HOMES` into a temp dir
+  and puts files in place of the macOS keychain; a test that writes a path calls `sandbox(t)`. A
+  resolver that reads a new variable adds it to `sandboxEnv` and itself to
+  `TestEveryPathResolvesInsideTheSandbox`.
 
 ## Codex accounts
 
@@ -202,8 +209,10 @@ limit (the classifier's patterns come from the Paloma One runner logs, the fake 
 replays them); interactive `vibemon exec` behaviour of features that need a full-scope login;
 the auth proxy against the real API (a Claude Code session on `ANTHROPIC_BASE_URL`, SSE through it,
 a switch reaching that session, and whether the session's own refresh of its startup account writes
-that account back over a switch: the 2.1.312 bundle says no, its refresh save is a compare-and-swap
-on the stored refresh token that adopts a newer write instead, but nobody has watched it happen);
+that account back over a switch: read from the code, not observed, it should not, because in the
+2.1.312 bundle the refresh save, the function that logs `OAuth refresh CAS save failed` and takes
+`postedRefreshToken`, writes only while the stored `claudeAiOauth.refreshToken` is empty or still
+the one it posted, and otherwise keeps what is stored);
 and the Codex proxy against the real API. Its routing was checked
 with codex 0.163.0 against local stand-ins only (`openai_base_url` sends `/models` and `/responses`
 to the proxy, `chatgpt_base_url` traffic stays on the own login, a 426 moves codex to HTTP for the
