@@ -78,7 +78,8 @@ func main() {
 func usageText() {
 	fmt.Println(`vibemon — Claude Code usage monitor and account switcher
 
-  vibemon                  run the menu bar app
+  vibemon                  run the menu bar app; on Linux, its background work in the foreground:
+                           both auth proxies, the usage monitor and the dashboard (127.0.0.1:6660)
   vibemon capture         store the account Claude Code is currently logged into
   vibemon list             list stored accounts (* marks the active one)
   vibemon switch <email>   make an account active: sessions on the auth proxy follow at once,

@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -10,7 +12,8 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
-// The menu bar app: tray, panel and settings windows around a monitor.
+// The menu bar app: tray, panel and settings windows around a monitor. Wails needs cgo and, on
+// Linux, GTK, so this half of vibemon is macOS only; Linux runs the monitor headless instead.
 
 //go:embed all:frontend
 var assets embed.FS
@@ -32,7 +35,7 @@ var densityLabels = []struct {
 	{densityFull, "Extra extended — with reset times"},
 }
 
-// runApp is what a bare `vibemon` does.
+// runApp is what a bare `vibemon` does on macOS.
 func runApp() error {
 	frontend, err := fs.Sub(assets, "frontend")
 	if err != nil {

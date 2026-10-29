@@ -10,8 +10,8 @@ import (
 )
 
 // The monitor is the app minus its menu bar: the poll loop that keeps usage, fleet.json and the
-// history fresh, auto-rotation, and the state the dashboard renders. The menu bar app (gui.go)
-// drives one.
+// history fresh, auto-rotation, and the state the dashboard renders. The menu bar app (gui.go) and
+// a headless run on Linux (headless_linux.go) both drive one.
 
 const (
 	// A 5-hour and a 7-day window do not move fast enough to justify polling hard, and the usage
@@ -77,7 +77,7 @@ const (
 // tokens while tray and panel handlers, or the dashboard's refresh, can act at any moment.
 type monitor struct {
 	// onPublish shows the state wherever else it is shown: the menu bar app repaints the tray and the
-	// panel.
+	// panel, a headless run logs each new notice.
 	onPublish func()
 
 	mu             sync.Mutex
