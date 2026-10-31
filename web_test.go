@@ -16,7 +16,7 @@ func webFixture(t *testing.T) *monitor {
 	now := time.Now()
 	in5h, in3d := now.Add(5*time.Hour), now.Add(3*24*time.Hour)
 	return &monitor{state: panelState{UpdatedAt: now, Accounts: []panelAccount{
-		{UUID: "a", Kind: kindClaude, Email: "a@x.io", Plan: "Max 20×", Active: true, HasLogin: true, HasToken: true, Turns: 3,
+		{UUID: "a", Kind: kindClaude, Email: "a@x.io", Plan: "Ultra", Active: true, HasLogin: true, HasToken: true, Turns: 3,
 			Usage: &Usage{Session: Gauge{Label: "Session", Percent: 46, Severity: "normal", ResetsAt: &in5h},
 				Weekly: Gauge{Label: "Weekly", Percent: 63, Severity: "normal", ResetsAt: &in3d},
 				Scoped: &Gauge{Label: "Fable", Percent: 97, Severity: "critical", ResetsAt: &in3d}, FetchedAt: now}},

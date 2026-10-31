@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -254,5 +255,41 @@ func TestVaultRoundTripKeepsClaudeEntriesUnchanged(t *testing.T) {
 	}
 	if bytes.Contains(raw, []byte(`"kind"`)) {
 		t.Errorf("a Claude entry gained a kind field on disk: %s", raw)
+	}
+}
+
+func TestPlanLabelFollowsTheUltraRename(t *testing.T) {
+	for tier, want := range map[string]string{
+		"default_claude_max_20x": "Ultra",
+		"default_claude_ultra":   "Ultra",
+		"default_claude_max_5x":  "Max",
+		"default_claude_pro":     "Pro",
+		"default_claude_zero":    "Free",
+	} {
+		if got := (&Account{RateTier: tier}).planLabel(); got != want {
+			t.Errorf("%s: got %q, want %q", tier, got, want)
+		}
+	}
+}
+
+// The usage endpoint as it answered for an Ultra account on 31.10.2026: no five_hour window, no
+// session entry in limits. The session gauge must read as absent, not as a healthy 0%.
+func TestNormalizeUltraHasNoSessionWindow(t *testing.T) {
+	var r usageResponse
+	body := `{"five_hour": null,
+	  "seven_day": {"utilization": 12.0, "resets_at": "2026-11-07T02:00:00.293000+00:00"},
+	  "limits": [{"group": "weekly", "kind": "weekly_all", "percent": 12, "resets_at": "2026-11-07T02:00:00Z"}]}`
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatal(err)
+	}
+	u := r.normalize(time.Now())
+	if u.Session.Live() {
+		t.Errorf("session window should be absent, got %+v", u.Session)
+	}
+	if !u.Weekly.Live() || u.Weekly.Percent != 12 {
+		t.Errorf("weekly window lost: %+v", u.Weekly)
+	}
+	if got := sessionNote(u.Session); strings.Contains(got, "%") {
+		t.Errorf("CLI shows a session percentage for Ultra: %q", got)
 	}
 }

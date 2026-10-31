@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -307,12 +308,19 @@ func (m *monitor) trayLabel() string {
 		if a.Usage == nil {
 			return "…"
 		}
-		label := fmt.Sprintf("%.0f%% · %.0f%%", a.Usage.Session.Percent, a.Usage.Weekly.Percent)
-		if m.density == densityFull {
-			label = fmt.Sprintf("%.0f%% %s · %.0f%% %s",
-				a.Usage.Session.Percent, until(a.Usage.Session.ResetsAt),
-				a.Usage.Weekly.Percent, until(a.Usage.Weekly.ResetsAt))
+		// Ultra has no session window: the label shows the weekly one alone.
+		var parts []string
+		for _, g := range []Gauge{a.Usage.Session, a.Usage.Weekly} {
+			if g.Label == "Session" && !g.Live() {
+				continue
+			}
+			p := fmt.Sprintf("%.0f%%", g.Percent)
+			if m.density == densityFull {
+				p += " " + until(g.ResetsAt)
+			}
+			parts = append(parts, p)
 		}
+		label := strings.Join(parts, " · ")
 		if a.Usage.Session.Severity != "normal" || a.Usage.Weekly.Severity != "normal" {
 			label = "⚠ " + label
 		}

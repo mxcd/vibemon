@@ -76,7 +76,8 @@ func (a *Account) kind() string {
 }
 
 // planLabel renders the subscription in the terms Anthropic bills in: a team seat tier when there
-// is one, otherwise the rate limit multiplier that actually governs the numbers on screen.
+// is one, otherwise the plan name the rate limit tier stands for. Since 10.2026 the plans are Free,
+// Pro, Max and Ultra; the API still reports the old tiers, max_5x for Max and max_20x for Ultra.
 func (a *Account) planLabel() string {
 	if a.kind() == kindCodex {
 		if a.Plan == "" {
@@ -96,10 +97,10 @@ func (a *Account) planLabel() string {
 	}
 	tier := strings.ToLower(a.RateTier)
 	switch {
-	case strings.Contains(tier, "max_20x"):
-		return "Max 20×"
-	case strings.Contains(tier, "max_5x"):
-		return "Max 5×"
+	case strings.Contains(tier, "ultra"), strings.Contains(tier, "max_20x"):
+		return "Ultra"
+	case strings.Contains(tier, "max_5x"), strings.Contains(tier, "max"):
+		return "Max"
 	case strings.Contains(tier, "pro"):
 		return "Pro"
 	case strings.Contains(tier, "zero"), strings.Contains(tier, "free"):
@@ -107,6 +108,8 @@ func (a *Account) planLabel() string {
 	}
 	// Unknown tier: fall back to the org type rather than invent a label.
 	switch strings.ToLower(a.Plan) {
+	case "claude_ultra":
+		return "Ultra"
 	case "claude_max":
 		return "Max"
 	case "claude_pro":

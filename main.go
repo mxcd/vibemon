@@ -277,8 +277,8 @@ func cmdCodexAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("added %s (%s)  session %.0f%%  weekly %.0f%% (%s)\n",
-		a.Email, a.planLabel(), u.Session.Percent, u.Weekly.Percent, until(u.Weekly.ResetsAt))
+	fmt.Printf("added %s (%s)  %s  weekly %.0f%% (%s)\n",
+		a.Email, a.planLabel(), sessionNote(u.Session), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 	cacheUsage(map[string]Usage{a.UUID: u})
 	return nil
 }
@@ -333,8 +333,8 @@ func cmdUsage() error {
 			continue
 		}
 		polled[a.UUID] = u
-		line := fmt.Sprintf("%s %-34s  session %3.0f%% (%s)   weekly %3.0f%% (%s)",
-			marker, a.Email, u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
+		line := fmt.Sprintf("%s %-34s  %s   weekly %3.0f%% (%s)",
+			marker, a.Email, sessionNote(u.Session), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 		if u.Scoped != nil {
 			line += fmt.Sprintf("   %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
 		}
@@ -344,6 +344,15 @@ func cmdUsage() error {
 		fmt.Println(line)
 	}
 	return saveVault(v)
+}
+
+// sessionNote is the 5 h window for the CLI lines, a dash on a plan without one (Ultra, some
+// ChatGPT plans) instead of a healthy-looking 0%.
+func sessionNote(g Gauge) string {
+	if !g.Live() {
+		return "session    -     "
+	}
+	return fmt.Sprintf("session %3.0f%% (%s)", g.Percent, until(g.ResetsAt))
 }
 
 func until(t *time.Time) string {
@@ -494,7 +503,7 @@ func usageNote(u *Usage) string {
 	if u == nil {
 		return "usage unknown (monitor not running, or no login captured)"
 	}
-	s := fmt.Sprintf("session %3.0f%% (%s)  weekly %3.0f%% (%s)", u.Session.Percent, until(u.Session.ResetsAt), u.Weekly.Percent, until(u.Weekly.ResetsAt))
+	s := fmt.Sprintf("%s  weekly %3.0f%% (%s)", sessionNote(u.Session), u.Weekly.Percent, until(u.Weekly.ResetsAt))
 	if u.Scoped != nil {
 		s += fmt.Sprintf("  %s %3.0f%%", u.Scoped.Label, u.Scoped.Percent)
 	}

@@ -145,6 +145,10 @@ function countdown(iso) {
   return `${m}m`;
 }
 
+// A window the account does not have (Ultra and some ChatGPT plans report no session one) reads as
+// 0% with no reset and is left out instead of shown as a healthy 0%. Mirrors Gauge.Live in web.go.
+const isLive = g => g && (g.percent > 0 || g.resetsAt);
+
 function gauge(name, g) {
   if (!g) return '';
   const pct = Math.max(0, Math.min(100, g.percent));
@@ -191,14 +195,12 @@ function render() {
   el('gauges').innerHTML = active && active.needsReauth
     ? `<div class="empty">This account needs a fresh login.<br>Run <b>claude /login</b>, then Capture.</div>`
     : u
-      ? gauge('Session · 5h', u.session) + gauge('Weekly · 7d', u.weekly) + (u.scoped ? gauge(u.scoped.label + ' · 7d', u.scoped) : '')
+      ? (isLive(u.session) ? gauge('Session · 5h', u.session) : '') + gauge('Weekly · 7d', u.weekly) + (u.scoped ? gauge(u.scoped.label + ' · 7d', u.scoped) : '')
       : `<div class="empty">${active && active.error ? esc(active.error) : 'waiting for usage…'}</div>`;
 
   const row = a => {
     const codex = a.kind === 'codex';
-    // A window the account does not have (ChatGPT plans report no session one) is left out
-    // instead of shown as a healthy 0%.
-    const live = a.usage ? [a.usage.session, a.usage.weekly].filter(g => g && (g.percent > 0 || g.resetsAt)) : [];
+    const live = a.usage ? [a.usage.session, a.usage.weekly].filter(isLive) : [];
     const nums = !a.usage ? '—'
       : live.length ? live.map(g => `${g.percent.toFixed(0)}%`).join(' · ')
       : '0%';
